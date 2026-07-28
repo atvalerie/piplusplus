@@ -1,0 +1,142 @@
+import { getQuickJS, type QuickJSContext, type QuickJSHandle } from "quickjs-emscripten";
+
+export interface SandboxBindings {
+	agent(prompt: unknown, options: unknown, phase: string): Promise<unknown>;
+	phase(name: unknown): void;
+	log(value: unknown): void;
+	models: unknown;
+	workflowPrompt: string;
+}
+
+export interface SandboxOptions {
+	timeoutMs: number;
+	memoryBytes?: number;
+	signal?: AbortSignal;
+	isAborted?: () => boolean;
+	onTimeout?: () => void;
+}
+
+function guestValue(vm: QuickJSContext, value: unknown): QuickJSHandle {
+	if (value === undefined) return vm.undefined;
+	if (value === null) return vm.null;
+	if (typeof value === "string") return vm.newString(value);
+	if (typeof value === "number") return vm.newNumber(value);
+	if (typeof value === "boolean") return value ? vm.true : vm.false;
+	return vm.newString(JSON.stringify(value));
+}
+
+/** Execute orchestration in QuickJS/WASM. Guest code has no Node, filesystem, process, network, or module capability. */
+export async function executeSandboxedWorkflow(source: string, bindings: SandboxBindings, options: SandboxOptions): Promise<unknown> {
+	const QuickJS = await getQuickJS();
+	const runtime = QuickJS.newRuntime();
+	const deadline = Date.now() + options.timeoutMs;
+	let deadlineReached = false;
+	let timeoutNotified = false;
+	const notifyTimeout = () => { if (!timeoutNotified) { timeoutNotified = true; options.onTimeout?.(); } };
+	runtime.setMemoryLimit(options.memoryBytes ?? 64 * 1024 * 1024);
+	runtime.setMaxStackSize(2 * 1024 * 1024);
+	runtime.setInterruptHandler(() => {
+		deadlineReached ||= Date.now() > deadline;
+		return deadlineReached || options.signal?.aborted === true || options.isAborted?.() === true;
+	});
+	const vm = runtime.newContext();
+	let phase = "Workflow";
+	const pending = new Set<Promise<unknown>>();
+
+	const install = (name: string, fn: (...args: QuickJSHandle[]) => QuickJSHandle) => {
+		const handle = vm.newFunction(name, fn);
+		handle.consume((value) => vm.setProp(vm.global, name, value));
+	};
+
+	install("__agent", (promptHandle, optionsHandle, phaseHandle) => {
+		const deferred = vm.newPromise();
+		const task = bindings.agent(vm.dump(promptHandle), vm.dump(optionsHandle), vm.getString(phaseHandle));
+		pending.add(task);
+		void task.then((value) => {
+			const handle = guestValue(vm, value);
+			deferred.resolve(handle);
+			if (handle !== vm.undefined && handle !== vm.null && handle !== vm.true && handle !== vm.false) handle.dispose();
+		}, (error) => {
+			const handle = vm.newError(error instanceof Error ? error.message : String(error));
+			deferred.reject(handle);
+			handle.dispose();
+		}).finally(() => pending.delete(task));
+		deferred.settled.then(() => runtime.executePendingJobs());
+		return deferred.handle;
+	});
+	install("__phase", (nameHandle) => {
+		const name = vm.dump(nameHandle);
+		bindings.phase(name);
+		phase = String(name);
+		return vm.undefined;
+	});
+	install("__log", (valueHandle) => { bindings.log(vm.dump(valueHandle)); return vm.undefined; });
+	install("__models", () => vm.newString(JSON.stringify(bindings.models)));
+	vm.setProp(vm.global, "workflowPrompt", vm.newString(bindings.workflowPrompt));
+
+	const prelude = `
+let __workflowPhase = "Workflow";
+const phase = (name) => { __workflowPhase = String(name); return __phase(name); };
+const agent = (prompt, options = {}) => __agent(prompt, options, __workflowPhase);
+const models = () => JSON.parse(__models());
+const log = (value) => __log(value);
+const parallel = async (tasks) => {
+  if (!Array.isArray(tasks)) throw new Error("parallel() requires an array");
+  return Promise.all(tasks.map(task => typeof task === "function" ? task() : task));
+};
+const pipeline = async (items, ...stages) => {
+  if (!Array.isArray(items)) throw new Error("pipeline() requires an array as its first argument");
+  let current = items;
+  for (const stage of stages) current = await Promise.all(current.map((item, index) => stage(item, index)));
+  return current;
+};
+(async () => { ${source}\n})()`;
+
+	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+	let promiseHandle: QuickJSHandle | undefined;
+	try {
+		const evaluation = vm.evalCode(prelude, "workflow.js");
+		if (evaluation.error) {
+			const detail = vm.dump(evaluation.error);
+			evaluation.error.dispose();
+			const message = typeof detail === "object" && detail && "message" in detail ? String((detail as any).message) : String(detail);
+			if (deadlineReached || Date.now() >= deadline || (/interrupted/i.test(message) && options.isAborted?.() !== true && options.signal?.aborted !== true)) {
+				deadlineReached = true;
+				notifyTimeout();
+				throw new Error(`Workflow exceeded wall-clock deadline (${options.timeoutMs}ms)`);
+			}
+			throw new Error(message);
+		}
+		promiseHandle = evaluation.value;
+		const resolution = vm.resolvePromise(promiseHandle);
+		runtime.executePendingJobs();
+		const timeout = new Promise<never>((_resolve, reject) => {
+			const delay = Math.max(0, deadline - Date.now());
+			deadlineTimer = setTimeout(() => { deadlineReached = true; notifyTimeout(); reject(new Error(`Workflow exceeded wall-clock deadline (${options.timeoutMs}ms)`)); }, delay);
+			options.signal?.addEventListener("abort", () => { if (deadlineTimer) clearTimeout(deadlineTimer); reject(new Error("Workflow sandbox aborted")); }, { once: true });
+		});
+		const resolved = await Promise.race([resolution, timeout]);
+		if (resolved.error) {
+			const detail = vm.dump(resolved.error);
+			resolved.error.dispose();
+			const message = typeof detail === "object" && detail && "message" in detail ? String((detail as any).message) : String(detail);
+			if (/interrupted/i.test(message) && options.isAborted?.() !== true && options.signal?.aborted !== true) {
+				deadlineReached = true;
+				notifyTimeout();
+				throw new Error(`Workflow exceeded wall-clock deadline (${options.timeoutMs}ms)`);
+			}
+			throw new Error(message);
+		}
+		const valueHandle = resolved.value;
+		const value = vm.dump(valueHandle);
+		valueHandle.dispose();
+		await Promise.allSettled(pending);
+		return value;
+	} finally {
+		if (deadlineTimer) clearTimeout(deadlineTimer);
+		await Promise.allSettled([...pending]);
+		promiseHandle?.dispose();
+		vm.dispose();
+		runtime.dispose();
+	}
+}

@@ -12,6 +12,8 @@ export interface FooterSnapshot {
 	outputTokens: number;
 	contextPercent?: number;
 	cost: number;
+	providerBalance?: number;
+	providerSavings?: number;
 	statuses?: readonly string[];
 }
 
@@ -31,7 +33,8 @@ export function renderFooter(snapshot: FooterSnapshot, width: number, theme: The
 	const project = paint(theme, `${snapshot.project}${branch}`, "muted");
 	const model = paint(theme, `${snapshot.model} · ${snapshot.thinking}`, "muted");
 	const context = snapshot.contextPercent === undefined ? "ctx —" : `ctx ${Math.max(0, Math.min(999, Math.round(snapshot.contextPercent)))}%`;
-	const usage = paint(theme, `${context} · ↑${formatCount(snapshot.inputTokens)} ↓${formatCount(snapshot.outputTokens)} · $${snapshot.cost.toFixed(3)}`, "subtle");
+	const provider = snapshot.providerBalance === undefined ? "" : ` · bal $${snapshot.providerBalance.toFixed(2)}${snapshot.providerSavings === undefined ? "" : ` · saved ~$${snapshot.providerSavings.toFixed(3)}`}`;
+	const usage = paint(theme, `${context} · ↑${formatCount(snapshot.inputTokens)} ↓${formatCount(snapshot.outputTokens)} · $${snapshot.cost.toFixed(3)}${provider}`, "subtle");
 	if (width < 52) return [fitLine(`${model} · ${context}`, width)];
 	if (width < 92) return [spread(project, `${model} · ${paint(theme, context, "subtle")}`, width)];
 	const status = snapshot.statuses?.length ? ` · ${snapshot.statuses.slice(0, 2).join(" · ")}` : "";

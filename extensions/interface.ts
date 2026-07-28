@@ -7,6 +7,7 @@ import { renderFooter } from "../ui/interface/footer.ts";
 import { KeybindingBrowser } from "../ui/interface/keybindings.ts";
 import { PiPlusPlusKeybindingRegistry } from "../ui/interface/piplusplus-keybindings.ts";
 import { Surface } from "../ui/primitives/surface.ts";
+import { getTelemetryService } from "./shared/telemetry-service.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 
@@ -92,9 +93,10 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 		});
 
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
+			const unsubscribeTelemetry = getTelemetryService()?.subscribe(() => tui.requestRender());
 			return {
-				dispose: unsubscribe,
+				dispose: () => { unsubscribeBranch(); unsubscribeTelemetry?.(); },
 				invalidate() {},
 				render(width: number): string[] {
 					let inputTokens = 0;
@@ -112,6 +114,7 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 					const contextPercent = latestContextTokens !== undefined && ctx.model?.contextWindow
 						? latestContextTokens / ctx.model.contextWindow * 100
 						: undefined;
+					const telemetry = ctx.model?.provider.startsWith("modelhub") ? getTelemetryService()?.get("modelhub") : undefined;
 					return renderFooter({
 						project: path.basename(ctx.cwd),
 						branch: footerData.getGitBranch() ?? undefined,
@@ -121,6 +124,8 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 						outputTokens,
 						contextPercent,
 						cost,
+						providerBalance: telemetry?.balance,
+						providerSavings: telemetry?.estimatedSavings,
 						statuses: [...footerData.getExtensionStatuses().values()],
 					}, width, theme);
 				},

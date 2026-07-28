@@ -5,13 +5,18 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { writeUnverifiedWorkflowArtifact } from "./artifact.ts";
+import { getPermissionService } from "../shared/permission-service.ts";
 import { modelCatalogText, serializeModels } from "./models.ts";
+import { explainPermission } from "./permissions.ts";
 import { createWorkflowController, validateWorkflowScript } from "./runtime.ts";
 import { WorkflowBrowser } from "./tui.ts";
-import { aggregateUsage, type ThinkingLevel, type WorkflowController, type WorkflowRun, type WorkflowSpec, zeroUsage } from "./types.ts";
+import { aggregateUsage, type AgentState, type PermissionRequest, type ThinkingLevel, type WorkflowController, type WorkflowRun, type WorkflowSpec, zeroUsage } from "./types.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 const WIDGET_ID = "piplusplus-workflows";
+const MAX_RUN_LOG_EVENTS = 100_000;
+const retentionDays = Math.max(1, Math.min(365, Number.parseInt(process.env.PIPLUSPLUS_WORKFLOW_RETENTION_DAYS ?? "30", 10) || 30));
 
 const WorkflowSchema = Type.Object({
 	name: Type.String({ description: "Short workflow name" }),
@@ -23,6 +28,7 @@ const WorkflowSchema = Type.Object({
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
 	background: Type.Optional(Type.Boolean({ description: "Run without blocking the conversation; default true" })),
 	approval: Type.Optional(StringEnum(["prompt", "skip"] as const)),
+	timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 86_400_000, description: "Parent-enforced workflow wall-clock deadline" })),
 });
 
 function formatTokens(value: number): string {
@@ -51,6 +57,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	const controllers = new Map<string, WorkflowController>();
 	const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const stateDir = path.join(getAgentDir(), "workflows", "runs");
+	const artifactDir = path.join(getAgentDir(), "workflows", "artifacts");
 	let ctxNow: ExtensionContext | undefined;
 	let restoreThinking: ThinkingLevel | undefined;
 	let pendingUltracodeTriggers = 0;
@@ -88,7 +95,9 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		}).join("\n"), 0, 0), { placement: "belowEditor" });
 	};
 
-	const changed = (run: WorkflowRun, event: string) => {
+	const changed = (run: WorkflowRun, event: string, agent?: AgentState) => {
+		if (run.logs.length < MAX_RUN_LOG_EVENTS) run.logs.push({ at: Date.now(), event, phase: run.currentPhase, status: run.status, agentId: agent?.id, agentStatus: agent?.status });
+		else run.droppedLogEvents = (run.droppedLogEvents ?? 0) + 1;
 		run.usage = aggregateUsage(run.agents);
 		schedulePersist(run, ["completed", "completed_with_flags", "failed", "stopped"].includes(run.status));
 		refreshUi();
@@ -98,6 +107,18 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	const notify = (message: string, level: "info" | "warning" | "error") => {
 		if (ctxNow?.hasUI) ctxNow.ui.notify(message, level);
 	};
+
+	async function requestPermission(run: WorkflowRun, request: PermissionRequest): Promise<boolean> {
+		const service = getPermissionService();
+		const mode = service?.getMode() ?? "read-only";
+		const decision = explainPermission(request, run.cwd, mode);
+		const agent = run.agents.find((candidate) => candidate.id === request.agentId);
+		agent?.logs.push({ at: Date.now(), type: "permission_request", tool: request.toolName, message: `${mode}/${decision.risk}: ${decision.explanation}` });
+		const concurrentMutation = (request.toolName === "write" || request.toolName === "edit") && run.agents.filter((candidate) => candidate.status === "running").length > 1;
+		const allow = service ? await service.authorize(request, ctxNow, concurrentMutation ? { forcePrompt: true, reason: "Multiple workflow agents are active; concurrent writes can conflict." } : undefined) : decision.allow;
+		agent?.logs.push({ at: Date.now(), type: allow ? "permission_allowed" : "permission_denied", tool: request.toolName, message: service ? `global ${mode} policy` : "global permission extension unavailable; read-only fallback" });
+		return allow;
+	}
 
 	async function approve(spec: WorkflowSpec, ctx: ExtensionContext): Promise<WorkflowSpec | undefined> {
 		if (spec.approval === "skip" || !ctx.hasUI) return spec;
@@ -142,13 +163,14 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "workflow_run",
 		label: "Dynamic Workflow",
-		description: "Compile and run a deterministic JavaScript orchestration script in the background. The script can create up to 1000 isolated subagents, each with its own agent(prompt, options), and manage up to 16 concurrently with parallel() and pipeline(). Intermediate results stay in script variables; only the returned value is delivered to the main conversation.",
+		description: "Compile and run a deterministic JavaScript orchestration script in the background. The script can create up to 1000 isolated subagents with manual, conservative auto, or read-only tool permissions, and manage up to 16 concurrently. Intermediate results stay in script variables; only the returned value is delivered to the main conversation.",
 		promptSnippet: "Run JavaScript-orchestrated background workflows with many independently prompted and model-routed subagents",
 		promptGuidelines: [
 			"Use workflow_run only when fan-out, context isolation, loops, branching, or independent verification materially improves the task.",
 			"Call workflow_models before workflow_run when selecting worker models. Explicit user model choices are binding; otherwise choose models at your own discretion from the returned authenticated catalog.",
 			"Every workflow_run script must give each subagent a task-specific prompt through agent(prompt, options). Do not use one generic shared worker prompt.",
 			"Use phase(name) for visible stages, parallel([() => agent(...), ...]) for fan-out, pipeline(items, stage...) for maps, ordinary JavaScript loops/branches for loop-until-done and classify-and-act, and a final agent critic/synthesizer before return when correctness matters.",
+			"Workflow workers inherit the global Pi++ permission service. Never treat workflow approval as permission to bypass global tool policy; if the permission extension is unavailable, workers fail closed to read-only behavior.",
 			"Avoid parallel agents editing overlapping files unless the workflow provides explicit isolation and merge handling.",
 		],
 		parameters: WorkflowSchema,
@@ -164,29 +186,39 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			const run: WorkflowRun = {
 				id: `wf_${Date.now().toString(36)}_${(++counter).toString(36)}`,
 				sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, spec, status: "queued", createdAt: Date.now(),
-				currentPhase: "Starting", phases: [], agents: [], flags: [], usage: zeroUsage(), paused: false,
+				currentPhase: "Starting", phases: [], agents: [], flags: [], usage: zeroUsage(), paused: false, logs: [],
 			};
 			runs.set(run.id, run);
 			const runtime = createWorkflowController(run, models, ctx.model, {
-				changed: (event) => {
-					changed(run, event);
+				changed: (event, agent) => {
+					changed(run, event, agent);
 					onUpdate?.({ content: [{ type: "text", text: `${icon(run.status)} ${run.spec.name} · ${run.currentPhase} · ${run.agents.length} agents` }], details: { runId: run.id, status: run.status } });
 				},
 				notify,
+				requestPermission: (request) => requestPermission(run, request),
 			});
 			controllers.set(run.id, runtime.controller);
 			changed(run, "created");
 			const background = spec.background ?? true;
-			const promise = runtime.execute().then(() => {
+			const promise = runtime.execute().then(async () => {
 				controllers.delete(run.id);
+				try {
+					const artifact = await writeUnverifiedWorkflowArtifact(run, artifactDir);
+					if (artifact) changed(run, "unverified_artifact_written");
+				} catch (error) {
+					run.logs.push({ at: Date.now(), event: `artifact_error:${error instanceof Error ? error.message : String(error)}`, phase: run.currentPhase, status: run.status });
+					notify(`Could not write workflow handoff artifact for ${run.spec.name}`, "warning");
+				}
+				await persistNow(run);
 				const level = run.status === "failed" ? "error" : run.status === "completed_with_flags" ? "warning" : "info";
 				notify(`Workflow ${run.status.replaceAll("_", " ")}: ${run.spec.name} · ${summary(run)}`, level);
 				if (background) {
+					const handoff = run.artifactPath ? `\n\nNo executed verification section was detected. Before reporting this workflow to the user, read the complete handoff JSON with the read tool:\n${run.artifactPath}` : "";
 					pi.sendMessage({
 						customType: "piplusplus-workflow-result",
-						content: `Workflow ${run.id} (${run.spec.name}) ${run.status}.\n\n${run.result ?? run.error ?? "No result"}\n\n${summary(run)}${run.flags.length ? `\nFlags:\n- ${run.flags.join("\n- ")}` : ""}`,
+						content: `Workflow ${run.id} (${run.spec.name}) ${run.status}.\n\n${run.result ?? run.error ?? "No result"}\n\n${summary(run)}${run.flags.length ? `\nFlags:\n- ${run.flags.join("\n- ")}` : ""}${handoff}`,
 						display: true,
-						details: { runId: run.id, status: run.status },
+						details: { runId: run.id, status: run.status, artifactPath: run.artifactPath },
 					}, { triggerTurn: true, deliverAs: "followUp" });
 				}
 			});
@@ -198,7 +230,8 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			signal?.addEventListener("abort", abort, { once: true });
 			await promise;
 			signal?.removeEventListener("abort", abort);
-			return { content: [{ type: "text", text: `${run.result ?? run.error ?? "No result"}\n\n${run.status} · ${summary(run)}` }], details: { runId: run.id, status: run.status, run } };
+			const handoff = run.artifactPath ? `\n\nNo executed verification section was detected. Read the complete workflow handoff JSON before reporting:\n${run.artifactPath}` : "";
+			return { content: [{ type: "text", text: `${run.result ?? run.error ?? "No result"}\n\n${run.status} · ${summary(run)}${handoff}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath, run } };
 		},
 		renderCall(args, theme) {
 			let text = `${theme.fg("toolTitle", theme.bold("workflow "))}${theme.fg("accent", args.name ?? "…")}`;
@@ -263,6 +296,8 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			"workflow_run executes a JavaScript orchestration body outside the main context. Each agent(prompt, options) starts an isolated Pi subagent with that distinct prompt. The script—not the main model—holds intermediate values, loops, branches, fan-out, and synthesis.",
 			ultracodeTriggered ? "The user's prompt contains the bounded trigger word `ultracode`. This is a one-prompt opt-in: use xhigh-level deliberation and generate a dynamic workflow for this task." : "Use workflows only when explicitly requested or materially useful; avoid them for small linear tasks.",
 			"Before model assignment, use workflow_models or this authenticated catalog. User choices win; otherwise choose each subagent model at your own discretion and set modelRationale. Do not rely blindly on auto routing.",
+			"A completed workflow without an executed verification worker produces a consolidated handoff JSON path in its result message. Read that file with the read tool before explaining the workflow to the user; it is the source of truth for the plan, script, prompts, every worker output, tools, logs, usage, errors, flags, and summary.",
+			"Workflow tool permissions are separate from script approval and inherit the global /permissions mode. Manual explains and confirms writes, edits, commands, and unknown custom tools; auto only permits operations proven low-risk; read-only blocks mutations. Confirmation-required operations fail closed without a UI.",
 			"Available primitives: phase(name); await agent(uniquePrompt, {id,label,kind,model,modelRationale,thinking,tools}); await parallel([() => agent(...), ...]); await pipeline(items, async item => agent(...)); models(); workflowPrompt; ordinary deterministic JavaScript; return finalResult. Maximum 16 concurrent and 1000 total agents.",
 			"Example shape: phase('Research'); const findings = await parallel(targets.map(t => () => agent(`Research ${t}`, {kind:'research', model:'provider/fast'}))); phase('Verify'); const checked = await parallel(findings.map((f,i) => () => agent(`Adversarially verify finding ${i}: ${f}`, {kind:'verification', model:'provider/strong'}))); phase('Synthesize'); return await agent(`Synthesize verified results: ${JSON.stringify(checked)}`, {kind:'synthesis', model:'provider/strong'});",
 			"Authenticated models:",
@@ -283,13 +318,22 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		restoreThinking = undefined;
 		pendingUltracodeTriggers = 0;
 		try {
-			await fs.promises.mkdir(stateDir, { recursive: true });
+			const cutoff = Date.now() - retentionDays * 86_400_000;
+			for (const directory of [stateDir, artifactDir]) {
+				await fs.promises.mkdir(directory, { recursive: true });
+				for (const file of await fs.promises.readdir(directory)) {
+					if (!file.endsWith(".json")) continue;
+					try { const stat = await fs.promises.stat(path.join(directory, file)); if (stat.mtimeMs < cutoff) await fs.promises.unlink(path.join(directory, file)); } catch {}
+				}
+			}
 			for (const file of await fs.promises.readdir(stateDir)) {
 				if (!file.endsWith(".json")) continue;
 				try {
 					const run = JSON.parse(await fs.promises.readFile(path.join(stateDir, file), "utf8")) as WorkflowRun;
 					if (run.sessionId !== ctx.sessionManager.getSessionId()) continue;
 					if (["queued", "running", "paused"].includes(run.status)) { run.status = "stopped"; run.finishedAt = Date.now(); run.error = "Interrupted by session restart or reload"; }
+					run.logs ??= [];
+					for (const agent of run.agents) agent.logs ??= [];
 					runs.set(run.id, run);
 				} catch { /* ignore malformed old state */ }
 			}

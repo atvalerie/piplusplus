@@ -2,10 +2,13 @@ import vm from "node:vm";
 import type { Model } from "@earendil-works/pi-ai";
 import { runChildAgent } from "./child.ts";
 import { resolveModel, serializeModels } from "./models.ts";
+import { terminateProcessTree } from "./processes.ts";
+import { executeSandboxedWorkflow } from "./sandbox.ts";
 import {
 	aggregateUsage,
 	type AgentOptions,
 	type AgentState,
+	type PermissionRequest,
 	type StepKind,
 	type WorkflowController,
 	type WorkflowRun,
@@ -14,7 +17,6 @@ import {
 
 const MAX_AGENTS = 1_000;
 const MAX_CONCURRENCY = 16;
-const MAX_AGENT_OUTPUT = 50_000;
 const MAX_FINAL_OUTPUT = 50_000;
 
 class Scheduler {
@@ -48,9 +50,11 @@ class Scheduler {
 export interface RuntimeCallbacks {
 	changed(event: string, agent?: AgentState): void;
 	notify(message: string, level: "info" | "warning" | "error"): void;
+	requestPermission(request: PermissionRequest): Promise<boolean>;
 }
 
 export function validateWorkflowScript(source: string): string | undefined {
+	// Node vm is used only as a parser here; untrusted code is never executed in the host realm.
 	try {
 		new vm.Script(`(async () => {\n${source}\n})()`, { filename: "dynamic-workflow.js" });
 		return undefined;
@@ -69,6 +73,7 @@ export function createWorkflowController(
 	let phase = "Workflow";
 	let sequence = 0;
 	let stopped = false;
+	let timedOut = false;
 
 	const update = (event: string, agent?: AgentState) => {
 		run.usage = aggregateUsage(run.agents);
@@ -97,7 +102,7 @@ export function createWorkflowController(
 			for (const agent of run.agents) {
 				if (agent.status === "queued" || agent.status === "running") {
 					agent.stopRequested = true;
-					agent.process?.kill("SIGTERM");
+					if (agent.process) terminateProcessTree(agent.process);
 					agent.status = "stopped";
 				}
 			}
@@ -109,7 +114,7 @@ export function createWorkflowController(
 			const agent = run.agents.find((candidate) => candidate.id === id);
 			if (!agent || !["queued", "running"].includes(agent.status)) return;
 			agent.stopRequested = true;
-			agent.process?.kill("SIGTERM");
+			if (agent.process) terminateProcessTree(agent.process);
 			agent.status = "stopped";
 			agent.finishedAt = Date.now();
 			update("agent_stopped", agent);
@@ -118,12 +123,12 @@ export function createWorkflowController(
 			const agent = run.agents.find((candidate) => candidate.id === id);
 			if (!agent || agent.status !== "running") return;
 			agent.restartRequested = true;
-			agent.process?.kill("SIGTERM");
+			if (agent.process) terminateProcessTree(agent.process);
 			update("agent_restarting", agent);
 		},
 	};
 
-	const runAgent = async (prompt: unknown, options: AgentOptions = {}): Promise<string | null> => {
+	const runAgent = async (prompt: unknown, options: AgentOptions = {}, requestedPhase = phase): Promise<string | null> => {
 		if (stopped) return null;
 		if (run.agents.length >= MAX_AGENTS) throw new Error(`Workflow agent limit exceeded (${MAX_AGENTS})`);
 		if (typeof prompt !== "string" || !prompt.trim()) throw new Error("agent() requires a non-empty prompt string");
@@ -133,7 +138,7 @@ export function createWorkflowController(
 		const agent: AgentState = {
 			id,
 			label: options.label ?? id,
-			phase,
+			phase: requestedPhase,
 			prompt,
 			kind,
 			requestedModel: options.model,
@@ -145,10 +150,11 @@ export function createWorkflowController(
 			flags: [],
 			usage: zeroUsage(),
 			toolCalls: [],
+			logs: [],
 			attempt: 0,
 		};
 		run.agents.push(agent);
-		if (!run.phases.includes(phase)) run.phases.push(phase);
+		if (!run.phases.includes(requestedPhase)) run.phases.push(requestedPhase);
 		update("agent_queued", agent);
 		if (!await scheduler.acquire()) { agent.status = "stopped"; return null; }
 		try {
@@ -168,7 +174,7 @@ export function createWorkflowController(
 				agent.attempt++;
 				agent.restartRequested = false;
 				update("agent_started", agent);
-				const result = await runChildAgent(run.cwd, agent, model, () => update("agent_progress", agent));
+				const result = await runChildAgent(run.cwd, agent, model, () => update("agent_progress", agent), callbacks.requestPermission);
 				agent.usage.input += result.usage.input;
 				agent.usage.output += result.usage.output;
 				agent.usage.cacheRead += result.usage.cacheRead;
@@ -193,7 +199,7 @@ export function createWorkflowController(
 					update("agent_failed", agent);
 					return null;
 				}
-				agent.output = result.output.slice(0, MAX_AGENT_OUTPUT);
+				agent.output = result.output;
 				agent.flags = result.output.split("\n").map((line) => line.match(/^\s*(?:WORKFLOW_FLAG|FLAG)\s*:\s*(.+)$/i)?.[1]?.trim()).filter((flag): flag is string => Boolean(flag));
 				agent.status = agent.flags.length ? "flagged" : "completed";
 				agent.finishedAt = Date.now();
@@ -210,55 +216,53 @@ export function createWorkflowController(
 		}
 	};
 
-	const parallel = async (tasks: unknown[]): Promise<unknown[]> => {
-		if (!Array.isArray(tasks)) throw new Error("parallel() requires an array");
-		return Promise.all(tasks.map((task) => typeof task === "function" ? (task as () => unknown)() : task));
-	};
-
-	const pipeline = async (items: unknown[], ...stages: Array<(item: unknown, index: number) => unknown>): Promise<unknown[]> => {
-		if (!Array.isArray(items)) throw new Error("pipeline() requires an array as its first argument");
-		let current = items;
-		for (const stage of stages) current = await Promise.all(current.map((item, index) => stage(item, index)));
-		return current;
-	};
-
 	const execute = async (): Promise<void> => {
 		run.status = "running";
 		run.startedAt = Date.now();
 		update("started");
 		try {
-			const context = vm.createContext({
-				agent: runAgent,
-				parallel,
-				pipeline,
-				phase(name: unknown) {
+			const value = await executeSandboxedWorkflow(run.spec.script, {
+				agent: (prompt, options, agentPhase) => runAgent(prompt, (options ?? {}) as AgentOptions, agentPhase),
+				phase(name) {
 					if (typeof name !== "string" || !name.trim()) throw new Error("phase() requires a name");
 					phase = name;
 					run.currentPhase = name;
 					if (!run.phases.includes(name)) run.phases.push(name);
 					update("phase_started");
 				},
-				models: () => serializeModels(models),
+				models: serializeModels(models),
 				workflowPrompt: run.spec.prompt,
-				log: (value: unknown) => update(`log:${String(value).slice(0, 200)}`),
-				JSON,
-			}, { codeGeneration: { strings: false, wasm: false } });
-			const script = new vm.Script(`(async () => {\n${run.spec.script}\n})()`, { filename: `${run.spec.name}.workflow.js` });
-			const value = await script.runInContext(context, { timeout: 1_000 });
+				log: (value) => update(`log:${String(value).slice(0, 200)}`),
+			}, {
+				timeoutMs: run.spec.timeoutMs ?? 30 * 60_000,
+				isAborted: () => stopped,
+				onTimeout: () => {
+					timedOut = true;
+					stopped = true;
+					scheduler.stop();
+					for (const agent of run.agents) {
+						if (!["queued", "running"].includes(agent.status)) continue;
+						agent.stopRequested = true;
+						agent.status = "stopped";
+						if (agent.process) terminateProcessTree(agent.process);
+					}
+				},
+			});
 			if (stopped) return;
-			run.result = (typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "(no result)").slice(0, MAX_FINAL_OUTPUT);
+			run.fullResult = typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "(no result)";
+			run.result = run.fullResult.slice(0, MAX_FINAL_OUTPUT);
 			run.finishedAt = Date.now();
 			const failed = run.agents.filter((agent) => agent.status === "failed").length;
 			run.status = run.flags.length || failed ? "completed_with_flags" : "completed";
 			if (failed) run.flags.push(`${failed} subagent(s) failed`);
 			update(run.status);
 		} catch (error) {
-			if (stopped) return;
+			if (stopped && !timedOut) return;
 			run.status = "failed";
 			run.finishedAt = Date.now();
 			run.error = error instanceof Error ? error.message : String(error);
 			callbacks.notify(`Workflow failed: ${run.spec.name}: ${run.error}`, "error");
-			update("failed");
+			update(timedOut ? "timed_out" : "failed");
 		}
 	};
 

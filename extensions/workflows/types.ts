@@ -35,6 +35,22 @@ export interface AgentOptions {
 	tools?: string[];
 }
 
+export interface AgentLogEntry {
+	at: number;
+	type: string;
+	tool?: string;
+	message?: string;
+}
+
+export interface WorkflowLogEntry {
+	at: number;
+	event: string;
+	phase: string;
+	status: RunStatus;
+	agentId?: string;
+	agentStatus?: AgentStatus;
+}
+
 export interface AgentState {
 	id: string;
 	label: string;
@@ -55,11 +71,22 @@ export interface AgentState {
 	flags: string[];
 	usage: UsageStats;
 	toolCalls: Array<{ name: string; args?: unknown; error?: boolean }>;
+	logs: AgentLogEntry[];
+	droppedLogEvents?: number;
 	attempt: number;
 	/** Runtime-only fields are omitted by JSON persistence. */
 	process?: ChildProcess;
 	restartRequested?: boolean;
 	stopRequested?: boolean;
+}
+
+export type PermissionMode = "manual" | "auto" | "read-only";
+
+export interface PermissionRequest {
+	agentId: string;
+	agentLabel: string;
+	toolName: string;
+	input: Record<string, unknown>;
 }
 
 export interface WorkflowSpec {
@@ -72,6 +99,7 @@ export interface WorkflowSpec {
 	concurrency?: number;
 	background?: boolean;
 	approval?: "prompt" | "skip";
+	timeoutMs?: number;
 }
 
 export interface WorkflowRun {
@@ -87,10 +115,15 @@ export interface WorkflowRun {
 	phases: string[];
 	agents: AgentState[];
 	result?: string;
+	/** Complete returned value for persistence; `result` may be presentation-truncated. */
+	fullResult?: string;
 	error?: string;
 	flags: string[];
 	usage: UsageStats;
 	paused: boolean;
+	logs: WorkflowLogEntry[];
+	droppedLogEvents?: number;
+	artifactPath?: string;
 }
 
 export interface ChildResult {

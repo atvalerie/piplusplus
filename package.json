@@ -17,5 +17,8 @@
     "extensions": [
       "./extensions/*.ts"
     ]
+  },
+  "dependencies": {
+    "quickjs-emscripten": "^0.32.0"
   }
 }

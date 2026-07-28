@@ -122,8 +122,11 @@ test("inspector collapses sections and permits content scrolling", () => {
 		{ id: "prompt", label: "Prompt", content: "one two three four five six seven eight nine ten" },
 		{ id: "result", label: "Result", content: "done" },
 	] });
-	assert.equal(inspector.render(12).length, 4);
+	const initial = inspector.render(12);
+	assert.equal(initial.length, 4);
 	inspector.handleInput("j");
+	assert.notDeepEqual(inspector.render(12), initial);
+	inspector.handleInput("\x1b[<65;1;1M");
 	assertFits(inspector.render(12), 12);
 	inspector.handleInput(" ");
 	assert.ok(inspector.render(12).length <= 4);

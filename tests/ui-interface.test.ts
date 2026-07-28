@@ -26,6 +26,8 @@ const snapshot: FooterSnapshot = {
 	outputTokens: 2_100,
 	contextPercent: 38.4,
 	cost: 0.084,
+	providerBalance: 1.65,
+	providerSavings: 0.012,
 	statuses: ["2 workflows"],
 };
 
@@ -38,6 +40,8 @@ test("footer responds at compact, regular, and wide widths", () => {
 	assert.match(renderFooter(snapshot, 36, theme)[0], /gpt-5\.4/);
 	assert.match(renderFooter(snapshot, 72, theme)[0], /piplusplus/);
 	assert.match(renderFooter(snapshot, 120, theme)[0], /2 workflows/);
+	assert.match(renderFooter(snapshot, 160, theme)[0], /bal \$1\.65/);
+	assert.match(renderFooter(snapshot, 160, theme)[0], /saved ~\$0\.012/);
 });
 
 test("token counts use compact stable formatting", () => {

@@ -41,12 +41,17 @@ export class Inspector implements Component {
 
 	handleInput(data: string): void {
 		let changed = false;
-		if (matchesKey(data, Key.down)) { this.selected = Math.min(this.options.sections.length - 1, this.selected + 1); changed = true; }
+		const mouse = data.match(/^\x1b\[<(\d+);\d+;\d+[Mm]$/);
+		const mouseButton = mouse ? Number(mouse[1]) : undefined;
+		if (mouseButton !== undefined && (mouseButton & 64) !== 0) this.viewport.scroll((mouseButton & 1) === 0 ? -3 : 3, this.lastContentHeight, this.lastViewportHeight);
+		else if (matchesKey(data, Key.down)) { this.selected = Math.min(this.options.sections.length - 1, this.selected + 1); changed = true; }
 		else if (matchesKey(data, Key.up)) { this.selected = Math.max(0, this.selected - 1); changed = true; }
 		else if (matchesKey(data, Key.home)) { this.selected = 0; changed = true; }
 		else if (matchesKey(data, Key.end)) { this.selected = Math.max(0, this.options.sections.length - 1); changed = true; }
 		else if (data === "j") this.viewport.scroll(1, this.lastContentHeight, this.lastViewportHeight);
 		else if (data === "k") this.viewport.scroll(-1, this.lastContentHeight, this.lastViewportHeight);
+		else if (matchesKey(data, Key.pageDown)) this.viewport.scroll(Math.max(1, this.lastViewportHeight - 2), this.lastContentHeight, this.lastViewportHeight);
+		else if (matchesKey(data, Key.pageUp)) this.viewport.scroll(-Math.max(1, this.lastViewportHeight - 2), this.lastContentHeight, this.lastViewportHeight);
 		else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || matchesKey(data, Key.right) || matchesKey(data, Key.left)) this.toggleSelected(data);
 		if (changed && this.selectedSection) {
 			this.selectionDirty = true;
