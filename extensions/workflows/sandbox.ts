@@ -3,6 +3,7 @@ import { getQuickJS, type QuickJSContext, type QuickJSHandle } from "quickjs-ems
 export interface SandboxBindings {
 	agent(prompt: unknown, options: unknown, phase: string): Promise<unknown>;
 	phase(name: unknown): void;
+	approve(title: unknown, detail: unknown): Promise<boolean>;
 	log(value: unknown): void;
 	models: unknown;
 	workflowPrompt: string;
@@ -67,6 +68,17 @@ export async function executeSandboxedWorkflow(source: string, bindings: Sandbox
 		deferred.settled.then(() => runtime.executePendingJobs());
 		return deferred.handle;
 	});
+	install("__approve", (titleHandle, detailHandle) => {
+		const deferred = vm.newPromise();
+		const task = bindings.approve(vm.dump(titleHandle), vm.dump(detailHandle));
+		pending.add(task);
+		void task.then((value) => deferred.resolve(value ? vm.true : vm.false), (error) => {
+			const handle = vm.newError(error instanceof Error ? error.message : String(error));
+			deferred.reject(handle); handle.dispose();
+		}).finally(() => pending.delete(task));
+		deferred.settled.then(() => runtime.executePendingJobs());
+		return deferred.handle;
+	});
 	install("__phase", (nameHandle) => {
 		const name = vm.dump(nameHandle);
 		bindings.phase(name);
@@ -86,6 +98,7 @@ const process = Object.freeze({ platform, cwd: () => cwd });
 let __workflowPhase = "Workflow";
 const phase = (name) => { __workflowPhase = String(name); return __phase(name); };
 const agent = (prompt, options = {}) => __agent(prompt, options, __workflowPhase);
+const approve = (title, detail = "") => __approve(String(title), String(detail));
 const models = () => JSON.parse(__models());
 const log = (value) => __log(value);
 const parallel = async (tasks) => {

@@ -8,7 +8,9 @@ import { Type } from "typebox";
 import { writeWorkflowArtifact } from "./artifact.ts";
 import { getPermissionService } from "../shared/permission-service.ts";
 import { modelCatalogText, serializeModels } from "./models.ts";
-import { explainPermission } from "./permissions.ts";
+import { explainPermission, isPathWithinWriteScope } from "./permissions.ts";
+import { PROFILE_NAMES } from "./profiles.ts";
+import { compileWorkflowRecipe, WORKFLOW_RECIPE_NAMES } from "./recipes.ts";
 import { createWorkflowController, validateWorkflowScript } from "./runtime.ts";
 import { Surface } from "../../ui/primitives/surface.ts";
 import { WorkflowBrowser } from "./tui.ts";
@@ -24,7 +26,8 @@ const WorkflowSchema = Type.Object({
 	why: Type.String({ description: "Why code-mode orchestration is better than one main-agent context for this task" }),
 	goal: Type.String({ description: "Concrete definition of done" }),
 	prompt: Type.String({ description: "The original task or workflow-level objective. Individual agent() calls still receive their own distinct prompts." }),
-	script: Type.String({ description: "Deterministic JavaScript body using agent(), parallel(), pipeline(), phase(), models(), workflowPrompt, and return. Top-level await is supported." }),
+	script: Type.Optional(Type.String({ description: "Deterministic JavaScript body using agent(), parallel(), pipeline(), phase(), approve(), models(), workflowPrompt, and return. Omit when using recipe." })),
+	recipe: Type.Optional(StringEnum(WORKFLOW_RECIPE_NAMES)),
 	userModelInstruction: Type.Optional(Type.String({ description: "Verbatim model preference stated by the user, if any" })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
 	background: Type.Optional(Type.Boolean({ description: "Run without blocking the conversation; default true" })),
@@ -138,6 +141,10 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		const mode = service?.getMode() ?? "read-only";
 		const decision = explainPermission(request, run.cwd, mode);
 		const agent = run.agents.find((candidate) => candidate.id === request.agentId);
+		if (agent?.writePaths && (request.toolName === "write" || request.toolName === "edit") && !isPathWithinWriteScope(run.cwd, request.input.path, agent.writePaths)) {
+			agent.logs.push({ at: Date.now(), type: "permission_denied", tool: request.toolName, message: `Target is outside declared write scope: ${agent.writePaths.join(", ")}` });
+			return false;
+		}
 		agent?.logs.push({ at: Date.now(), type: "permission_request", tool: request.toolName, message: `${mode}/${decision.risk}: ${decision.explanation}` });
 		const concurrentMutation = (request.toolName === "write" || request.toolName === "edit") && run.agents.filter((candidate) => candidate.status === "running").length > 1;
 		const allow = service ? await service.authorize(request, ctxNow, concurrentMutation ? { forcePrompt: true, reason: "Multiple workflow agents are active; concurrent writes can conflict." } : undefined) : decision.allow;
@@ -191,16 +198,26 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		description: "Compile and run a deterministic JavaScript orchestration script in the background. The script can create up to 1000 isolated subagents with manual, conservative auto, or read-only tool permissions, and manage up to 16 concurrently. Intermediate results stay in script variables; only the returned value is delivered to the main conversation.",
 		promptSnippet: "Run JavaScript-orchestrated background workflows with many independently prompted and model-routed subagents",
 		promptGuidelines: [
+			"Prefer audited recipes for standard work: diagnose, design, review, or implement. Generate custom JavaScript only when the requested control flow cannot be represented by a recipe.",
 			"Use workflow_run only when fan-out, context isolation, loops, branching, or independent verification materially improves the task.",
 			"Call workflow_models before workflow_run when selecting worker models. Explicit user model choices are binding; otherwise choose models at your own discretion from the returned authenticated catalog.",
-			"Every workflow_run script must give each subagent a task-specific prompt through agent(prompt, options). Do not use one generic shared worker prompt.",
+			`Reusable profiles: ${PROFILE_NAMES.join(", ")}. Prefer profiles over ad-hoc role prose; their structured JSON contracts are validated and invalid output is retried.`,
+			"Every custom workflow_run script must give each subagent a task-specific prompt through agent(prompt, options). Do not use one generic shared worker prompt.",
 			"Use phase(name) for visible stages, parallel([() => agent(...), ...]) for fan-out, pipeline(items, stage...) for maps, ordinary JavaScript loops/branches for loop-until-done and classify-and-act, and a final agent critic/synthesizer before return when correctness matters.",
 			"Workflow workers inherit the global Pi++ permission service. Never treat workflow approval as permission to bypass global tool policy; if the permission extension is unavailable, workers fail closed to read-only behavior.",
 			"Avoid parallel agents editing overlapping files unless the workflow provides explicit isolation and merge handling.",
 		],
 		parameters: WorkflowSchema,
 		async execute(_id, params, signal, onUpdate, ctx) {
-			let spec = params as WorkflowSpec;
+			const requested = params as Partial<WorkflowSpec>;
+			let spec: WorkflowSpec;
+			if (requested.recipe) {
+				const recipe = compileWorkflowRecipe(requested.recipe);
+				spec = { ...requested, recipe: recipe.name, script: recipe.script, background: requested.background ?? recipe.background } as WorkflowSpec;
+			} else {
+				if (!requested.script?.trim()) throw new Error("workflow_run requires either recipe or script");
+				spec = requested as WorkflowSpec;
+			}
 			const compileError = validateWorkflowScript(spec.script);
 			if (compileError) throw new Error(`Invalid workflow JavaScript: ${compileError}`);
 			const approved = await approve(spec, ctx);
@@ -223,6 +240,12 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				},
 				notify,
 				requestPermission: (request) => requestPermission(run, request),
+				requestApproval: async (title, detail) => {
+					if (!ctx.hasUI) return false;
+					const shown = detail.length > 12_000 ? `${detail.slice(0, 12_000)}\n…` : detail;
+					const choice = await ctx.ui.select(`${title}\n\n${shown}`, ["Approve and continue", "Reject and stop"]);
+					return choice === "Approve and continue";
+				},
 			});
 			controllers.set(run.id, runtime.controller);
 			changed(run, "created");
@@ -325,13 +348,15 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		}
 		const instructions = [
 			"# Dynamic JavaScript workflows",
-			"workflow_run executes a JavaScript orchestration body outside the main context. Each agent(prompt, options) starts an isolated Pi subagent with that distinct prompt. The script—not the main model—holds intermediate values, loops, branches, fan-out, and synthesis.",
+			"workflow_run runs either an audited named recipe or a custom JavaScript orchestration body outside the main context. Each agent(prompt, options) starts an isolated Pi subagent with a distinct assignment. Prefer recipe:'diagnose'|'design'|'review'|'implement' for standard work; generate JavaScript only for genuinely custom control flow.",
 			ultracodeTriggered ? "The user's prompt contains the bounded trigger word `ultracode`. This is a one-prompt opt-in: use xhigh-level deliberation and generate a dynamic workflow for this task." : "Use workflows only when explicitly requested or materially useful; avoid them for small linear tasks.",
 			"Before model assignment, use workflow_models or this authenticated catalog. User choices win; otherwise choose each subagent model at your own discretion and set modelRationale. Do not rely blindly on auto routing.",
 			"Every workflow immediately creates a continuously updated JSON artifact whose path is returned by workflow_run. Use the read tool to inspect it at any time and always read it before reporting; read access is permitted by the global policy even though the artifact is outside the project. It is the source of truth for the script, live status, retries, prompts, outputs, tools, logs, usage, errors, verification, flags, and summary.",
 			"Workflow tool permissions are separate from script approval and inherit the global /permissions mode. Manual explains and confirms writes, edits, commands, and unknown custom tools; auto only permits operations proven low-risk; read-only blocks mutations. Confirmation-required operations fail closed without a UI.",
-			"Available primitives: phase(name); await agent(uniquePrompt, {id,label,kind,model,modelRationale,thinking,tools}); await parallel([() => agent(...), ...]); await pipeline(items, async item => agent(...)); models(); workflowPrompt; cwd; platform; ordinary deterministic JavaScript; return finalResult. A capability-free compatibility facade exposes process.cwd() and process.platform, but prefer cwd/platform directly. tools accepts an array, comma-separated names, 'read-only', or 'all'. Maximum 16 concurrent and 1000 total agents.",
-			"Example shape: phase('Research'); const findings = await parallel(targets.map(t => () => agent(`Research ${t}`, {kind:'research', model:'provider/fast'}))); phase('Verify'); const checked = await parallel(findings.map((f,i) => () => agent(`Adversarially verify finding ${i}: ${f}`, {kind:'verification', model:'provider/strong'}))); phase('Synthesize'); return await agent(`Synthesize verified results: ${JSON.stringify(checked)}`, {kind:'synthesis', model:'provider/strong'});",
+			`Specialist profiles are ${PROFILE_NAMES.join(", ")}. Profiles add evidence-focused instructions and, except synthesizer, runtime-validated JSON status contracts; malformed output retries automatically. Use writePaths on mutating workers to enforce direct write/edit scope.`,
+			"Available custom-script primitives: phase(name); await agent(uniquePrompt, {id,label,profile,kind,model,modelRationale,thinking,tools,writePaths}); await approve(title, detail); parallel(...); pipeline(...); models(); workflowPrompt; cwd; platform; return. Use cwd/platform directly, never assume Node globals, filesystem APIs, require, fetch, or environment access. Maximum 16 concurrent and 1000 total agents.",
+			"Prompt workers with objective, scope, constraints, required evidence, expected deliverable, and explicit stop/escalation conditions. Do not prescribe commands they can discover from repository configuration. Keep factual investigation separate from planning, implementation, and independent verification. Never ask a synthesizer to invent evidence missing from upstream workers.",
+			"For custom correctness-sensitive work, use this shape: evidence collection → independent verification or counter-evidence → synthesis. For mutations: inspect/plan → approve(plan) → scoped implementation → independent code and security review → synthesis. Do not mark a workflow successful merely because tools ran or tests exited zero; require evidence tied to the requested behavior.",
 			"Authenticated models:",
 			catalog || "(none)",
 		].join("\n\n");

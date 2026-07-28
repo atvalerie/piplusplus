@@ -40,6 +40,7 @@ test("footer responds at compact, regular, and wide widths", () => {
 		assert.ok(visibleWidth(lines[0]) <= width);
 	}
 	assert.match(renderFooter(snapshot, 36, theme)[0], /perm:auto/);
+	assert.match(renderFooter({ ...snapshot, permissionMode: "plan" }, 36, theme)[0], /perm:plan/);
 	assert.match(renderFooter(snapshot, 36, theme)[0], /gpt-5\.4/);
 	assert.match(renderFooter(snapshot, 72, theme)[0], /piplusplus/);
 	assert.match(renderFooter(snapshot, 72, theme)[0], /2 workflows/);

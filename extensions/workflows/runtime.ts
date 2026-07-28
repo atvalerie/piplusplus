@@ -3,6 +3,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { runChildAgent } from "./child.ts";
 import { resolveModel, serializeModels } from "./models.ts";
 import { terminateProcessTree } from "./processes.ts";
+import { applyWorkflowProfile, validateProfileOutput } from "./profiles.ts";
 import { executeSandboxedWorkflow } from "./sandbox.ts";
 import {
 	aggregateUsage,
@@ -61,6 +62,7 @@ export interface RuntimeCallbacks {
 	changed(event: string, agent?: AgentState): void;
 	notify(message: string, level: "info" | "warning" | "error"): void;
 	requestPermission(request: PermissionRequest): Promise<boolean>;
+	requestApproval(title: string, detail: string): Promise<boolean>;
 }
 
 export function validateWorkflowScript(source: string): string | undefined {
@@ -153,18 +155,23 @@ export function createWorkflowController(
 		if (typeof prompt !== "string" || !prompt.trim()) throw new Error("agent() requires a non-empty prompt string");
 		const id = options.id ?? `agent_${++sequence}`;
 		if (run.agents.some((agent) => agent.id === id)) throw new Error(`Duplicate agent id: ${id}`);
-		const kind: StepKind = options.kind ?? "general";
-		const tools = normalizeWorkflowTools(options.tools);
+		const applied = applyWorkflowProfile(prompt, options.profile);
+		const profile = applied.profile;
+		const kind: StepKind = options.kind ?? profile?.kind ?? "general";
+		const tools = normalizeWorkflowTools(options.tools ?? profile?.tools);
+		const writePaths = options.writePaths === undefined ? undefined : Array.isArray(options.writePaths) && options.writePaths.every((item) => typeof item === "string") ? [...new Set(options.writePaths)] : (() => { throw new Error("writePaths must be an array of paths"); })();
 		const agent: AgentState = {
 			id,
 			label: options.label ?? id,
 			phase: requestedPhase,
-			prompt,
+			prompt: applied.prompt,
 			kind,
 			requestedModel: options.model,
 			modelRationale: options.modelRationale,
 			thinking: options.thinking,
 			tools,
+			profile: profile?.name,
+			writePaths,
 			status: "queued",
 			createdAt: Date.now(),
 			flags: [],
@@ -206,10 +213,11 @@ export function createWorkflowController(
 					continue;
 				}
 				if (agent.stopRequested || stopped) { agent.status = "stopped"; agent.finishedAt = Date.now(); update("agent_stopped", agent); return null; }
-				const failed = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted" || !result.output;
+				const validation = result.output ? validateProfileOutput(profile, result.output) : {};
+				const failed = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted" || !result.output || Boolean(validation.error);
 				if (failed) {
 					if (result.output) agent.output = result.output;
-					const error = result.errorMessage || result.stderr.trim() || `Worker exited with code ${result.exitCode}`;
+					const error = validation.error || result.errorMessage || result.stderr.trim() || `Worker exited with code ${result.exitCode}`;
 					const maxRetries = Math.max(0, Math.min(10, run.spec.maxRetries ?? 3));
 					if (agent.attempt <= maxRetries) {
 						const base = Math.max(100, Math.min(60_000, run.spec.retryBaseMs ?? 1_000));
@@ -233,6 +241,7 @@ export function createWorkflowController(
 					return null;
 				}
 				agent.output = result.output;
+				agent.structuredOutput = validation.value;
 				agent.flags = result.output.split("\n").map((line) => line.match(/^\s*(?:WORKFLOW_FLAG|FLAG)\s*:\s*(.+)$/i)?.[1]?.trim()).filter((flag): flag is string => Boolean(flag));
 				agent.status = agent.flags.length ? "flagged" : "completed";
 				agent.finishedAt = Date.now();
@@ -256,6 +265,7 @@ export function createWorkflowController(
 		try {
 			const value = await executeSandboxedWorkflow(run.spec.script, {
 				agent: (prompt, options, agentPhase) => runAgent(prompt, (options ?? {}) as AgentOptions, agentPhase),
+				approve: (title, detail) => callbacks.requestApproval(String(title), String(detail)),
 				phase(name) {
 					if (typeof name !== "string" || !name.trim()) throw new Error("phase() requires a name");
 					phase = name;
@@ -287,6 +297,8 @@ export function createWorkflowController(
 			if (stopped) return;
 			run.fullResult = typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "(no result)";
 			run.result = run.fullResult.slice(0, MAX_FINAL_OUTPUT);
+			const resultFlags = run.fullResult.split("\n").map((line) => line.match(/^\s*(?:WORKFLOW_FLAG|FLAG)\s*:\s*(.+)$/i)?.[1]?.trim()).filter((flag): flag is string => Boolean(flag));
+			for (const flag of resultFlags) if (!run.flags.includes(flag)) run.flags.push(flag);
 			run.finishedAt = Date.now();
 			const failed = run.agents.filter((agent) => agent.status === "failed").length;
 			run.status = run.flags.length || failed ? "completed_with_flags" : "completed";

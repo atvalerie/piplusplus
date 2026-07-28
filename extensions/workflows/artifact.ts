@@ -26,7 +26,7 @@ export async function writeWorkflowArtifact(run: WorkflowRun, directory: string)
 		kind: "piplusplus.workflow.state",
 		reason: "Continuously updated workflow source of truth for live inspection and final handoff.",
 		workflow: {
-			id: run.id, name: run.spec.name, why: run.spec.why, goal: run.spec.goal, prompt: run.spec.prompt,
+			id: run.id, name: run.spec.name, recipe: run.spec.recipe, why: run.spec.why, goal: run.spec.goal, prompt: run.spec.prompt,
 			userModelInstruction: run.spec.userModelInstruction, script: run.spec.script, concurrency: run.spec.concurrency ?? 4,
 			timeoutMs: run.spec.timeoutMs ?? 30 * 60_000, maxRetries: run.spec.maxRetries ?? 3, retryBaseMs: run.spec.retryBaseMs ?? 1_000,
 			cwd: run.cwd, sessionId: run.sessionId,
@@ -42,12 +42,12 @@ export async function writeWorkflowArtifact(run: WorkflowRun, directory: string)
 		agents: run.agents.map((agent) => ({
 			id: agent.id, label: agent.label, phase: agent.phase, kind: agent.kind, prompt: agent.prompt,
 			requestedModel: agent.requestedModel, resolvedModel: agent.resolvedModel, modelRationale: agent.modelRationale,
-			thinking: agent.thinking, tools: agent.tools, status: agent.status, attempt: agent.attempt, nextRetryAt: agent.nextRetryAt,
+			thinking: agent.thinking, tools: agent.tools, profile: agent.profile, writePaths: agent.writePaths, status: agent.status, attempt: agent.attempt, nextRetryAt: agent.nextRetryAt,
 			createdAt: agent.createdAt, startedAt: agent.startedAt, finishedAt: agent.finishedAt, usage: agent.usage,
 			flags: agent.flags, toolCalls: agent.toolCalls,
 			messages: agent.messages ?? [], rawEvents: agent.events ?? [], droppedEvents: agent.droppedEvents ?? 0,
 			logs: agent.logs, droppedLogEvents: agent.droppedLogEvents ?? 0,
-			output: agent.output, error: agent.error,
+			output: agent.output, structuredOutput: agent.structuredOutput, error: agent.error,
 		})),
 		logs: run.logs,
 	};

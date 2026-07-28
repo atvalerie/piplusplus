@@ -1,10 +1,12 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { PermissionRequest } from "./workflows/types.ts";
 
-export type GlobalPermissionMode = "manual" | "auto" | "read-only";
+export type GlobalPermissionMode = "manual" | "auto" | "read-only" | "plan";
 export interface PermissionService {
 	getMode(): GlobalPermissionMode;
 	setMode(mode: GlobalPermissionMode): Promise<void>;
+	getModes?(): GlobalPermissionMode[];
+	registerMode?(mode: GlobalPermissionMode): () => void;
 	subscribe?(listener: () => void): () => void;
 	authorize(request: PermissionRequest, ctx?: ExtensionContext, options?: { forcePrompt?: boolean; reason?: string }): Promise<boolean>;
 }

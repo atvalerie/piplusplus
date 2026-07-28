@@ -146,6 +146,7 @@ export class WorkflowBrowser {
 			const agent = this.agent()!;
 			lines.push(`  ${icon(agent.status)} ${th.bold(agent.label)} ${th.fg("dim", `· ${agent.id}`)}`);
 			lines.push(`  ${th.fg("muted", "Model: ")}${agent.resolvedModel ?? agent.requestedModel ?? "auto"}${agent.modelRationale ? th.fg("dim", ` — ${agent.modelRationale}`) : ""}`);
+			if (agent.profile) lines.push(`  ${th.fg("muted", "Profile: ")}${agent.profile}${agent.writePaths ? th.fg("dim", ` · write scope: ${agent.writePaths.join(", ")}`) : ""}`);
 			lines.push(`  ${th.fg("muted", "State: ")}${agent.status} · attempt ${agent.attempt} · ${agent.usage.turns} turns · $${agent.usage.cost.toFixed(4)}`, "");
 			const detail: string[] = [th.fg("accent", "Prompt"), ...wrapTextWithAnsi(agent.prompt, Math.max(10, width - 4)), "", th.fg("accent", "Tool calls")];
 			if (!agent.toolCalls.length) detail.push(th.fg("dim", "(none)"));

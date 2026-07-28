@@ -33,7 +33,9 @@ export interface AgentOptions {
 	model?: string;
 	modelRationale?: string;
 	thinking?: ThinkingLevel;
-	tools?: string[];
+	tools?: string[] | string;
+	profile?: string;
+	writePaths?: string[];
 }
 
 export interface AgentLogEntry {
@@ -63,6 +65,9 @@ export interface AgentState {
 	resolvedModel?: string;
 	thinking?: ThinkingLevel;
 	tools?: string[];
+	profile?: string;
+	writePaths?: string[];
+	structuredOutput?: unknown;
 	status: AgentStatus;
 	createdAt: number;
 	startedAt?: number;
@@ -102,6 +107,7 @@ export interface WorkflowSpec {
 	goal: string;
 	prompt: string;
 	script: string;
+	recipe?: string;
 	userModelInstruction?: string;
 	concurrency?: number;
 	background?: boolean;

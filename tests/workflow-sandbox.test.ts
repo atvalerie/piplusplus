@@ -4,7 +4,7 @@ import { normalizeWorkflowTools } from "../extensions/workflows/runtime.ts";
 import { executeSandboxedWorkflow, type SandboxBindings } from "../extensions/workflows/sandbox.ts";
 
 function bindings(agent: SandboxBindings["agent"] = async (prompt) => String(prompt)): SandboxBindings {
-	return { agent, phase: () => {}, log: () => {}, models: [{ id: "model" }], workflowPrompt: "original", cwd: "C:\\repo", platform: "win32" };
+	return { agent, phase: () => {}, approve: async () => true, log: () => {}, models: [{ id: "model" }], workflowPrompt: "original", cwd: "C:\\repo", platform: "win32" };
 }
 
 test("workflow tool aliases normalize generated read-only configurations", () => {

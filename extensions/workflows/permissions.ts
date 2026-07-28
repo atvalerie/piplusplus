@@ -65,6 +65,17 @@ function inside(cwd: string, value: unknown): boolean {
 	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
+export function isPathWithinWriteScope(cwd: string, value: unknown, writePaths: string[] | undefined): boolean {
+	if (!writePaths) return true;
+	if (typeof value !== "string" || !writePaths.length) return false;
+	const target = path.resolve(cwd, value);
+	return writePaths.some((allowed) => {
+		const root = path.resolve(cwd, allowed);
+		const relative = path.relative(root, target);
+		return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+	});
+}
+
 export function explainPermission(request: PermissionRequest, cwd: string, mode: PermissionMode): PermissionDecision {
 	if (READ_TOOLS.has(request.toolName)) return { allow: true, automatic: true, risk: "safe", explanation: `Read-only ${request.toolName} operation.` };
 	if (mode === "read-only") return { allow: false, automatic: true, risk: "caution", explanation: `${request.toolName} is blocked in read-only mode.` };
