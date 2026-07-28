@@ -24,6 +24,34 @@ export interface ModelHubCatalog {
 	unit: string;
 }
 
+export type ModelHubFamily = string;
+
+const MODEL_FAMILY_KEY = Symbol.for("piplusplus.modelhub-model-families");
+
+function modelFamilies(): Map<string, ModelHubFamily> {
+	const root = globalThis as any;
+	return root[MODEL_FAMILY_KEY] ??= new Map<string, ModelHubFamily>();
+}
+
+function normalizeModelHubFamily(value: string): ModelHubFamily | undefined {
+	const family = value.trim().toLowerCase();
+	return family || undefined;
+}
+
+/** Preserve authoritative vendor metadata that Pi's generic Model type cannot carry. */
+export function registerModelHubFamilies(catalog: Pick<ModelHubCatalog, "catalog">): void {
+	const registry = modelFamilies();
+	for (const model of catalog.catalog) {
+		const family = normalizeModelHubFamily(model.family);
+		if (family) registry.set(model.id, family);
+	}
+}
+
+export function modelHubFamilyFor(model: { provider: string; id: string }): ModelHubFamily | undefined {
+	if (!/^modelhub(?:-[2-8])?$/.test(model.provider.toLowerCase())) return undefined;
+	return modelFamilies().get(model.id);
+}
+
 export interface ModelHubUsage {
 	requests?: number; tokens?: number; cost?: number; spent_today?: number; spent_month?: number;
 	success_requests?: number; cache_saved_tokens?: number; cache_base_tokens?: number;
@@ -51,6 +79,7 @@ function anthropicEffort(model: ModelHubCatalogModel): { adaptive: boolean; map?
 }
 
 export function catalogToModels(catalog: ModelHubCatalog): ProviderModelConfig[] {
+	registerModelHubFamilies(catalog);
 	const prices = new Map(catalog.prices.map((price) => [price.model, price]));
 	return catalog.catalog
 		.filter((model) => model.capabilities.streaming && !model.capabilities.image_generation && model.context_window > 0)

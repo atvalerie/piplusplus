@@ -5,7 +5,7 @@ import {
 	openAIResponsesApi,
 	type Api,
 	type Model,
-} from "@earendil-works/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { catalogToModels, fetchModelHub, MODELHUB_BASE_URL, type ModelHubCatalog } from "./shared/modelhub.ts";
 

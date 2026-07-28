@@ -1,26 +1,51 @@
 import type { Model } from "@earendil-works/pi-ai";
-import type { ModelChoice, ModelFamilyPolicy, StepKind } from "./types.ts";
+import { modelHubFamilyFor } from "../shared/modelhub.ts";
+import type { DefaultModelRouting, ModelChoice, ModelFamily, StepKind, WorkflowModelPolicy, WorkflowProvider } from "./types.ts";
 
-export function modelMatchesFamily(model: Pick<Model, "provider" | "id" | "name">, family: ModelFamilyPolicy): boolean {
-	const name = `${model.provider}/${model.id} ${model.name ?? ""}`.toLowerCase();
-	if (family === "gpt") return /(?:^|[^a-z])gpt(?:[^a-z]|$)/i.test(name);
-	if (family === "openai") return /openai|gpt|codex|(?:^|[\/\s])o[134](?:[-\s.]|$)/i.test(name);
-	return /anthropic|claude/i.test(name);
+export const SUPPORTED_WORKFLOW_PROVIDERS = ["opencode-go", "anthropic", "openai", "modelhub"] as const satisfies readonly WorkflowProvider[];
+const SUPPORTED_PROVIDER_SET = new Set<string>(SUPPORTED_WORKFLOW_PROVIDERS);
+
+/** Normalize exact Pi provider IDs into the four provider groups supported by workflows. */
+export function workflowProvider(model: Pick<Model, "provider">): WorkflowProvider | undefined {
+	const provider = model.provider.trim().toLowerCase();
+	if (/^modelhub(?:-[2-8])?$/.test(provider)) return "modelhub";
+	return SUPPORTED_PROVIDER_SET.has(provider) ? provider as WorkflowProvider : undefined;
 }
 
-export function inferModelFamilyInstruction(...values: Array<string | undefined>): ModelFamilyPolicy | undefined {
-	const text = values.filter(Boolean).join("\n").toLowerCase();
-	if (/\b(?:compare|mix|both|different)\b[^\n.]{0,80}\b(?:gpt|openai)\b[^\n.]{0,80}\b(?:claude|anthropic)\b|\b(?:compare|mix|both|different)\b[^\n.]{0,80}\b(?:claude|anthropic)\b[^\n.]{0,80}\b(?:gpt|openai)\b/.test(text)) return undefined;
-	const gpt = /\b(?:use|pick|choose|select|must use|only use|all)\b[^\n.]{0,60}\b(?:gpt|openai)\b|\b(?:gpt|openai)(?:[-\s]+only)?\s+models?\b/.test(text);
-	const claude = /\b(?:use|pick|choose|select|must use|only use|all)\b[^\n.]{0,60}\b(?:claude|anthropic)\b|\b(?:claude|anthropic)(?:[-\s]+only)?\s+models?\b/.test(text);
-	if (gpt === claude) return undefined;
-	if (gpt) return /\bopenai\b/.test(text) && !/\bgpt\b/.test(text) ? "openai" : "gpt";
-	return "claude";
+export function filterSupportedWorkflowModels<T extends Pick<Model, "provider">>(models: T[]): T[] {
+	return models.filter((model) => workflowProvider(model) !== undefined);
+}
+
+export function modelFamily(model: Pick<Model, "provider" | "id" | "name">): ModelFamily | undefined {
+	const modelHub = modelHubFamilyFor(model);
+	if (modelHub) return modelHub;
+	const provider = model.provider.toLowerCase();
+	if (provider === "openai") return "openai";
+	if (provider === "anthropic") return "anthropic";
+	return undefined;
+}
+
+export function modelAllowedByPolicy(
+	model: Pick<Model, "provider" | "id" | "name">,
+	policy: WorkflowModelPolicy,
+): boolean {
+	const fullId = `${model.provider}/${model.id}`;
+	if (policy.allowedProviders?.length) {
+		const provider = workflowProvider(model);
+		if (!provider || !policy.allowedProviders.includes(provider)) return false;
+	}
+	if (policy.allowedModels?.length && !policy.allowedModels.includes(fullId) && !policy.allowedModels.includes(model.id)) return false;
+	if (policy.allowedFamilies?.length) {
+		const family = modelFamily(model);
+		if (!family || !policy.allowedFamilies.includes(family)) return false;
+	}
+	return true;
 }
 
 export function serializeModels(models: Model[]): ModelChoice[] {
 	return models.map((model) => ({
 		provider: model.provider,
+		providerGroup: workflowProvider(model),
 		id: model.id,
 		name: model.name ?? model.id,
 		reasoning: Boolean(model.reasoning),
@@ -28,13 +53,37 @@ export function serializeModels(models: Model[]): ModelChoice[] {
 		maxTokens: model.maxTokens ?? 0,
 		inputCost: model.cost?.input ?? 0,
 		outputCost: model.cost?.output ?? 0,
+		family: modelFamily(model),
 	}));
 }
 
 export function modelCatalogText(models: ModelChoice[]): string {
 	return models.map((model) =>
-		`- ${model.provider}/${model.id}: ${model.name}; ${model.reasoning ? "reasoning" : "non-reasoning"}; context ${model.contextWindow}; max output ${model.maxTokens}; $${model.inputCost}/$${model.outputCost} per M input/output`,
+		`- ${model.provider}/${model.id}: ${model.name}; provider group ${model.providerGroup ?? "unsupported"}; family ${model.family ?? "unknown"}; ${model.reasoning ? "reasoning" : "non-reasoning"}; context ${model.contextWindow}; max output ${model.maxTokens}; $${model.inputCost}/$${model.outputCost} per M input/output`,
 	).join("\n");
+}
+
+/** Bounded main-agent summary. Exact identities stay behind workflow_models. */
+export function modelCatalogSummary(models: ModelChoice[]): string {
+	const providerCounts = new Map<string, number>();
+	const familyCounts = new Map<string, number>();
+	let reasoning = 0;
+	for (const model of models) {
+		const provider = model.providerGroup ?? workflowProvider(model) ?? "unsupported";
+		providerCounts.set(provider, (providerCounts.get(provider) ?? 0) + 1);
+		const family = (model.family ?? "unknown").trim().toLowerCase().slice(0, 32) || "unknown";
+		familyCounts.set(family, (familyCounts.get(family) ?? 0) + 1);
+		if (model.reasoning) reasoning++;
+	}
+	const entries = [...familyCounts.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+	const shown = entries.slice(0, 12);
+	const hiddenFamilies = Math.max(0, entries.length - shown.length);
+	const families = shown.map(([family, count]) => `${family}:${count}`).join(", ") || "none";
+	const providers = [...providerCounts.entries()]
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([provider, count]) => `${provider}:${count}`)
+		.join(", ") || "none";
+	return `${models.length} authenticated supported models; providers ${providers}; families ${families}${hiddenFamilies ? `, +${hiddenFamilies} more families` : ""}; reasoning-capable:${reasoning}. Exact model IDs and prices are intentionally omitted here; call workflow_models before exact, provider, or cross-family routing.`;
 }
 
 function versionScore(name: string): number {
@@ -75,10 +124,24 @@ export function chooseAutoModel(models: Model[], kind: StepKind, main?: Model): 
 	return scored.sort((a, b) => b.score - a.score)[0]?.model ?? main;
 }
 
-export function resolveModel(models: Model[], requested: string | undefined, kind: StepKind, main?: Model): Model | undefined {
+export function resolveModel(
+	models: Model[],
+	requested: string | undefined,
+	kind: StepKind,
+	main?: Model,
+	defaultRouting: DefaultModelRouting = "inherit",
+): Model | undefined {
 	if (requested && requested !== "auto") {
+		if (requested === "inherit") {
+			return main && models.some((model) => model.provider === main.provider && model.id === main.id) ? main : undefined;
+		}
 		return models.find((model) => `${model.provider}/${model.id}` === requested)
 			?? models.find((model) => model.id === requested);
 	}
-	return chooseAutoModel(models, kind, main);
+	if (requested === "auto" || defaultRouting === "auto") return chooseAutoModel(models, kind, main);
+	return main && models.some((model) => model.provider === main.provider && model.id === main.id) ? main : undefined;
+}
+
+export function reportedModelMatches(expected: Pick<Model, "provider" | "id">, reported: string | undefined): boolean {
+	return reported === expected.id || reported === `${expected.provider}/${expected.id}`;
 }

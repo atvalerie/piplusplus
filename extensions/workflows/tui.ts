@@ -2,8 +2,11 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentState, WorkflowController, WorkflowRun } from "./types.ts";
 
+export type WorkflowStatusFilter = "all" | "active" | "completed" | "attention";
+const STATUS_FILTERS: WorkflowStatusFilter[] = ["all", "active", "completed", "attention"];
+
 function icon(status: string): string {
-	return ({ queued: "○", running: "⏳", paused: "Ⅱ", completed: "✓", completed_with_flags: "⚑", flagged: "⚑", failed: "✗", stopped: "■" } as Record<string, string>)[status] ?? "·";
+	return ({ queued: "○", running: "⏳", paused: "Ⅱ", completed: "✓", completed_with_flags: "⚑", flagged: "⚑", budget_exhausted: "⚠", failed: "✗", stopped: "■" } as Record<string, string>)[status] ?? "·";
 }
 
 function tokens(value: number): string {
@@ -28,21 +31,42 @@ export class WorkflowBrowser {
 	private agentIndex = 0;
 	private scroll = 0;
 	private detailMaxScroll = 0;
+	private statusFilter: WorkflowStatusFilter = "all";
 	private readonly getRuns: () => WorkflowRun[];
 	private readonly controllers: Map<string, WorkflowController>;
 	private readonly theme: Theme;
 	private readonly close: () => void;
 	private readonly height: number;
+	private readonly resumeRun?: (runId: string, restartAgentId?: string) => void;
+	private readonly saveRun?: (runId: string) => void;
 
-	constructor(getRuns: () => WorkflowRun[], controllers: Map<string, WorkflowController>, theme: Theme, close: () => void, height = 30) {
+	constructor(
+		getRuns: () => WorkflowRun[],
+		controllers: Map<string, WorkflowController>,
+		theme: Theme,
+		close: () => void,
+		height = 30,
+		resumeRun?: (runId: string, restartAgentId?: string) => void,
+		saveRun?: (runId: string) => void,
+	) {
 		this.getRuns = getRuns;
 		this.controllers = controllers;
 		this.theme = theme;
 		this.close = close;
 		this.height = height;
+		this.resumeRun = resumeRun;
+		this.saveRun = saveRun;
 	}
 
-	private run(): WorkflowRun | undefined { return this.getRuns()[this.runIndex]; }
+	private visibleRuns(): WorkflowRun[] {
+		return this.getRuns().filter((run) => {
+			if (this.statusFilter === "all") return true;
+			if (this.statusFilter === "active") return ["queued", "running", "paused"].includes(run.status);
+			if (this.statusFilter === "completed") return run.status === "completed";
+			return ["completed_with_flags", "budget_exhausted", "failed", "stopped"].includes(run.status);
+		});
+	}
+	private run(): WorkflowRun | undefined { return this.visibleRuns()[this.runIndex]; }
 	private phases(): string[] { return this.run()?.phases ?? []; }
 	private agents(): AgentState[] {
 		const run = this.run();
@@ -59,9 +83,25 @@ export class WorkflowBrowser {
 			return;
 		}
 		if (matchesKey(data, Key.ctrl("c"))) { this.close(); return; }
+		if (data === "f") {
+			this.statusFilter = STATUS_FILTERS[(STATUS_FILTERS.indexOf(this.statusFilter) + 1) % STATUS_FILTERS.length];
+			this.level = "runs";
+			this.runIndex = 0;
+			this.phaseIndex = 0;
+			this.agentIndex = 0;
+			this.scroll = 0;
+			return;
+		}
+		if (data === "s") {
+			const run = this.run();
+			if (run) this.saveRun?.(run.id);
+			return;
+		}
 		if (data === "p") {
 			const run = this.run(); const controller = run ? this.controllers.get(run.id) : undefined;
-			if (run?.status === "paused") controller?.resume(); else controller?.pause();
+			if (run?.status === "stopped") this.resumeRun?.(run.id);
+			else if (run?.status === "paused") controller?.resume();
+			else controller?.pause();
 			return;
 		}
 		if (data === "x") {
@@ -70,9 +110,17 @@ export class WorkflowBrowser {
 			else controller?.stop();
 			return;
 		}
+		if (data === "X") {
+			const run = this.run();
+			if (run) this.controllers.get(run.id)?.hardStop();
+			return;
+		}
 		if (data === "r" && (this.level === "agents" || this.level === "detail")) {
 			const run = this.run(); const agent = this.agent();
-			if (run && agent) this.controllers.get(run.id)?.restartAgent(agent.id);
+			if (run && agent) {
+				this.controllers.get(run.id)?.restartAgent(agent.id);
+				if (["stopped", "completed", "completed_with_flags", "budget_exhausted", "failed"].includes(run.status)) this.resumeRun?.(run.id, agent.id);
+			}
 			return;
 		}
 		if (this.level === "detail") {
@@ -85,7 +133,7 @@ export class WorkflowBrowser {
 			this.scroll = Math.max(0, Math.min(this.detailMaxScroll, this.scroll));
 			return;
 		}
-		const max = this.level === "runs" ? this.getRuns().length : this.level === "phases" ? this.phases().length : this.agents().length;
+		const max = this.level === "runs" ? this.visibleRuns().length : this.level === "phases" ? this.phases().length : this.agents().length;
 		if (matchesKey(data, Key.up)) {
 			if (this.level === "runs" && this.runIndex === 0) { this.close(); return; }
 			if (this.level === "runs") this.runIndex = Math.max(0, this.runIndex - 1);
@@ -107,9 +155,9 @@ export class WorkflowBrowser {
 
 	render(width: number): string[] {
 		const th = this.theme;
-		const lines: string[] = ["", `  ${th.fg("accent", th.bold("Dynamic workflows"))} ${th.fg("dim", `· ${this.level}`)}`, ""];
+		const lines: string[] = ["", `  ${th.fg("accent", th.bold("Dynamic workflows"))} ${th.fg("dim", `· ${this.level} · filter:${this.statusFilter}`)}`, ""];
 		let focusLine = 3;
-		const runs = this.getRuns();
+		const runs = this.visibleRuns();
 		this.runIndex = Math.min(this.runIndex, Math.max(0, runs.length - 1));
 		if (this.level === "runs") {
 			if (!runs.length) lines.push(`  ${th.fg("dim", "No workflows in this session")}`);
@@ -131,6 +179,16 @@ export class WorkflowBrowser {
 				lines.push(` ${i === this.phaseIndex ? th.fg("accent", ">") : " "} ${th.fg("accent", phases[i])} ${th.fg("dim", `· ${done}/${agents.length}`)}`);
 			}
 			lines.push("", `  ${th.fg("dim", stats(run))}`);
+			if (run.budget) {
+				const limits = [
+					`${run.agents.length}/${run.budget.maxAgents} agents`,
+					run.budget.maxTokens === undefined ? undefined : `${tokens(run.usage.input + run.usage.output + run.usage.cacheRead + run.usage.cacheWrite)}/${tokens(run.budget.maxTokens)} tokens`,
+					run.budget.maxCost === undefined ? undefined : `$${run.usage.cost.toFixed(4)}/$${run.budget.maxCost.toFixed(4)}`,
+					`${tokens(run.budget.projectedTokens)} projected`,
+				].filter(Boolean).join(" · ");
+				lines.push(`  ${th.fg(run.budget.exhausted ? "warning" : "dim", `Budget: ${limits}`)}`);
+				for (const warning of run.budget.warnings) lines.push(`  ${th.fg("warning", `⚠ ${warning}`)}`);
+			}
 			for (const flag of run.flags) lines.push(`  ${th.fg("warning", `⚑ ${flag}`)}`);
 			if (run.error) lines.push(`  ${th.fg("error", run.error)}`);
 		} else if (this.level === "agents") {
@@ -140,15 +198,17 @@ export class WorkflowBrowser {
 			for (let i = 0; i < agents.length; i++) {
 				const agent = agents[i];
 				if (i === this.agentIndex) focusLine = lines.length;
-				lines.push(` ${i === this.agentIndex ? th.fg("accent", ">") : " "} ${icon(agent.status)} ${agent.label} ${th.fg("dim", `· ${agent.resolvedModel ?? agent.requestedModel ?? "auto"} · ${agent.usage.turns} turns · $${agent.usage.cost.toFixed(4)}`)}`);
+				lines.push(` ${i === this.agentIndex ? th.fg("accent", ">") : " "} ${icon(agent.status)} ${agent.label} ${th.fg("dim", `· ${agent.resolvedModel ?? agent.requestedModel ?? "auto"} · ${agent.cached ? "cached" : "live"} · ${agent.usage.turns} turns · $${agent.usage.cost.toFixed(4)}`)}`);
 				if (agent.error) lines.push(`     ${th.fg("error", agent.error)}`);
 			}
 		} else {
 			const agent = this.agent()!;
 			lines.push(`  ${icon(agent.status)} ${th.bold(agent.label)} ${th.fg("dim", `· ${agent.id}`)}`);
-			lines.push(`  ${th.fg("muted", "Model: ")}${agent.resolvedModel ?? agent.requestedModel ?? "auto"}${agent.modelRationale ? th.fg("dim", ` — ${agent.modelRationale}`) : ""}`);
+			lines.push(`  ${th.fg("muted", "Requested model: ")}${agent.requestedModel ?? "omitted (inherit by policy)"}`);
+			lines.push(`  ${th.fg("muted", "Resolved model: ")}${agent.resolvedModel ?? "(not resolved)"}`);
+			lines.push(`  ${th.fg("muted", "Reported model: ")}${agent.reportedModel ?? "(not reported)"}${agent.modelRationale ? th.fg("dim", ` — ${agent.modelRationale}`) : ""}`);
 			if (agent.profile) lines.push(`  ${th.fg("muted", "Profile: ")}${agent.profile}${agent.writePaths ? th.fg("dim", ` · write scope: ${agent.writePaths.join(", ")}`) : ""}`);
-			lines.push(`  ${th.fg("muted", "State: ")}${agent.status} · attempt ${agent.attempt} · ${agent.usage.turns} turns · $${agent.usage.cost.toFixed(4)}`, "");
+			lines.push(`  ${th.fg("muted", "State: ")}${agent.status} · ${agent.cached ? "cached" : "live"} · attempt ${agent.attempt} · ${agent.usage.turns}${agent.maxTurns ? `/${agent.maxTurns}` : ""} turns · $${agent.usage.cost.toFixed(4)}`, "");
 			const detail: string[] = [th.fg("accent", "Prompt"), ...wrapTextWithAnsi(agent.prompt, Math.max(10, width - 4)), "", th.fg("accent", "Tool calls")];
 			if (!agent.toolCalls.length) detail.push(th.fg("dim", "(none)"));
 			for (const tool of agent.toolCalls) detail.push(`${tool.error ? th.fg("error", "✗") : "→"} ${tool.name} ${th.fg("dim", JSON.stringify(tool.args ?? {}).slice(0, 300))}`);
@@ -161,7 +221,7 @@ export class WorkflowBrowser {
 			lines.push(...window.map((line) => `  ${line}`));
 			if (detail.length > windowSize) lines.push(`  ${th.fg("dim", `j/k, pgup/pgdn, or wheel · ${this.scroll + 1}-${Math.min(detail.length, this.scroll + windowSize)}/${detail.length}`)}`);
 		}
-		const footer = ["", `  ${th.fg("dim", "↑ at first run returns to prompt · enter/→ details · esc/← back · p pause · x stop · r restart")}`, ""];
+		const footer = ["", `  ${th.fg("dim", "enter/→ details · esc/← back · f filter · s save · p pause/resume · x stop (resumable) · X hard stop · r restart selected")}`, ""];
 		const header = lines.slice(0, 3);
 		const body = lines.slice(3);
 		const available = Math.max(1, this.height - header.length - footer.length);

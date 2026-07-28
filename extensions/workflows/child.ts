@@ -36,6 +36,22 @@ function finalText(messages: Message[]): string {
 	return "";
 }
 
+export function shouldTerminateAtTurnLimit(message: Message, turns: number, maxTurns: number | undefined): boolean {
+	if (!maxTurns || turns < maxTurns || message.role !== "assistant") return false;
+	const hasToolCall = message.content.some((part) => part.type === "toolCall");
+	return hasToolCall || message.stopReason === "toolUse" || message.stopReason === "tool_use";
+}
+
+export function createTurnLimitGuard(maxTurns: number | undefined, terminate: () => void): (message: Message, turns: number) => boolean {
+	let terminated = false;
+	return (message, turns) => {
+		if (terminated || !shouldTerminateAtTurnLimit(message, turns, maxTurns)) return false;
+		terminated = true;
+		terminate();
+		return true;
+	};
+}
+
 export async function runChildAgent(
 	cwd: string,
 	agent: AgentState,
@@ -60,6 +76,7 @@ export async function runChildAgent(
 	let selectedModel: string | undefined;
 	let stopReason: string | undefined;
 	let settled = false;
+	let turnLimitTerminated = false;
 	let errorMessage: string | undefined;
 
 	const exitCode = await new Promise<number>((resolve) => {
@@ -76,6 +93,13 @@ export async function runChildAgent(
 			if (agent.logs.length < MAX_LOG_EVENTS) agent.logs.push(entry);
 			else agent.droppedLogEvents = (agent.droppedLogEvents ?? 0) + 1;
 		};
+		const turnLimitGuard = createTurnLimitGuard(agent.maxTurns, () => {
+			turnLimitTerminated = true;
+			stopReason = "max_turns";
+			errorMessage = `Worker reached maxTurns (${agent.maxTurns}) before completing`;
+			addLog({ at: Date.now(), type: "max_turns", message: errorMessage });
+			terminateProcessTree(proc);
+		});
 		addLog({ at: Date.now(), type: "process_start", message: `${call.command} ${call.args.slice(0, -1).join(" ")}` });
 		const permissionOutput = proc.stdio[3];
 		const permissionInput = proc.stdio[4];
@@ -131,8 +155,11 @@ export async function runChildAgent(
 						usage.cost += cost; agent.usage.cost += cost;
 					}
 					selectedModel ||= message.model;
-					stopReason = message.stopReason;
-					errorMessage = message.errorMessage;
+					if (!turnLimitTerminated) {
+						stopReason = message.stopReason;
+						errorMessage = message.errorMessage;
+					}
+					turnLimitGuard(message, usage.turns);
 				}
 				onUpdate();
 			}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { catalogToModels, dashboardCookie, estimateCacheSavings, estimateModelHubSavings, normalizeModelHubTelemetry, type ModelHubCatalog } from "../extensions/shared/modelhub.ts";
+import { catalogToModels, dashboardCookie, estimateCacheSavings, estimateModelHubSavings, modelHubFamilyFor, normalizeModelHubTelemetry, type ModelHubCatalog } from "../extensions/shared/modelhub.ts";
 
 const catalog: ModelHubCatalog = {
 	catalog_schema_version: 2, currency: "USD", unit: "per_1m_tokens",
@@ -8,17 +8,24 @@ const catalog: ModelHubCatalog = {
 	catalog: [
 		{ id: "claude-test", provider: "Anthropic", family: "anthropic", endpoints: ["/v1/messages"], context_window: 200_000, capabilities: { vision: true, reasoning: true, streaming: true }, free: false },
 		{ id: "gpt-test", provider: "OpenAI", family: "openai", endpoints: ["/v1/responses"], context_window: 256_000, capabilities: { vision: true, reasoning: true, streaming: true }, free: true },
+		{ id: "grok-test", provider: "xAI", family: "xai", endpoints: ["/v1/chat/completions"], context_window: 128_000, capabilities: { reasoning: true, streaming: true }, free: false },
 		{ id: "image-test", provider: "OpenAI", family: "openai", endpoints: ["/v1/images/generations"], context_window: 0, capabilities: { image_generation: true, streaming: false }, free: false },
 	],
 	prices: [
 		{ model: "claude-test", input_per_mtok: 0.2, output_per_mtok: 1, cache_read_per_mtok: 0.02 },
 		{ model: "gpt-test", input_per_mtok: 0.03, output_per_mtok: 0.15, cache_read_per_mtok: 0.005 },
+		{ model: "grok-test", input_per_mtok: 0.1, output_per_mtok: 0.5, cache_read_per_mtok: 0.01 },
 	],
 };
 
+test("ModelHub provider imports against the Pi 0.82 public API surface", async () => {
+	const provider = await import("../extensions/modelhub-provider.ts");
+	assert.equal(typeof provider.default, "function");
+});
+
 test("ModelHub catalog maps compatible endpoints, capabilities, and live prices", () => {
 	const models = catalogToModels(catalog);
-	assert.equal(models.length, 2);
+	assert.equal(models.length, 3);
 	assert.equal(models[0].api, "anthropic-messages");
 	assert.equal(models[0].baseUrl, "https://modelhub.my");
 	assert.deepEqual(models[0].input, ["text", "image"]);
@@ -28,6 +35,10 @@ test("ModelHub catalog maps compatible endpoints, capabilities, and live prices"
 	assert.equal(models[1].cost.cacheRead, 0.005);
 	assert.deepEqual(models[1].thinkingLevelMap, { xhigh: "xhigh", max: "xhigh" });
 	assert.equal(models[0].thinkingLevelMap, undefined);
+	assert.equal(modelHubFamilyFor({ provider: "modelhub", id: "claude-test" }), "anthropic");
+	assert.equal(modelHubFamilyFor({ provider: "modelhub-8", id: "gpt-test" }), "openai");
+	assert.equal(modelHubFamilyFor({ provider: "modelhub", id: "grok-test" }), "xai");
+	assert.equal(modelHubFamilyFor({ provider: "other", id: "gpt-test" }), undefined);
 
 	const claudeModels = catalogToModels({ ...catalog, prices: [], catalog: [
 		{ ...catalog.catalog[0], id: "claude-opus-4-8" },

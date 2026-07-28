@@ -1,11 +1,17 @@
 import type { ChildProcess } from "node:child_process";
 import type { Message } from "@earendil-works/pi-ai";
+import type { OutputScanFinding } from "./output-scan.ts";
 
 export type StepKind = "research" | "discovery" | "planning" | "implementation" | "review" | "verification" | "synthesis" | "general";
-export type ModelFamilyPolicy = "gpt" | "openai" | "claude";
+export type ModelFamily = string;
+export type WorkflowProvider = "opencode-go" | "anthropic" | "openai" | "modelhub";
+export type DefaultModelRouting = "inherit" | "auto";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type RunStatus = "queued" | "running" | "paused" | "completed" | "completed_with_flags" | "failed" | "stopped";
-export type AgentStatus = "queued" | "running" | "completed" | "flagged" | "failed" | "stopped";
+export type WorkflowSize = "small" | "medium" | "large" | "unrestricted";
+export type RunStatus = "queued" | "running" | "paused" | "completed" | "completed_with_flags" | "budget_exhausted" | "failed" | "stopped";
+export type AgentStatus = "queued" | "running" | "completed" | "flagged" | "budget_exhausted" | "failed" | "stopped";
+/** JSON Schema is copied as inert JSON data across the QuickJS boundary. */
+export type JSONSchema = boolean | Record<string, unknown>;
 
 export interface UsageStats {
 	input: number;
@@ -18,6 +24,8 @@ export interface UsageStats {
 
 export interface ModelChoice {
 	provider: string;
+	/** Canonical supported workflow provider; ModelHub key aliases collapse to `modelhub`. */
+	providerGroup?: WorkflowProvider;
 	id: string;
 	name: string;
 	reasoning: boolean;
@@ -25,6 +33,22 @@ export interface ModelChoice {
 	maxTokens: number;
 	inputCost: number;
 	outputCost: number;
+	family?: ModelFamily;
+}
+
+export interface WorkflowModelPolicy {
+	/**
+	 * Claude-compatible default is inherit. Auto is used only when the
+	 * orchestrating model deliberately delegates omitted choices to the router.
+	 */
+	defaultRouting: DefaultModelRouting;
+	/** Hard source/provider allowlist interpreted by the orchestrating model. */
+	allowedProviders?: WorkflowProvider[];
+	/** Hard underlying-family and exact-model allowlists. */
+	allowedFamilies?: ModelFamily[];
+	allowedModels?: string[];
+	/** Human-readable explanation persisted for approval and auditing. */
+	rationale: string;
 }
 
 export interface AgentOptions {
@@ -37,6 +61,13 @@ export interface AgentOptions {
 	tools?: string[] | string;
 	profile?: string;
 	writePaths?: string[];
+	maxTurns?: number;
+	/**
+	 * When present, the worker must return one JSON value that validates against
+	 * this schema. The parsed value (including arrays, scalars, and null when
+	 * permitted by the schema) is returned to the workflow script.
+	 */
+	schema?: JSONSchema;
 }
 
 export interface AgentLogEntry {
@@ -64,16 +95,28 @@ export interface AgentState {
 	requestedModel?: string;
 	modelRationale?: string;
 	resolvedModel?: string;
+	reportedModel?: string;
 	thinking?: ThinkingLevel;
 	tools?: string[];
 	profile?: string;
 	writePaths?: string[];
+	maxTurns?: number;
+	schema?: JSONSchema;
 	structuredOutput?: unknown;
 	status: AgentStatus;
 	createdAt: number;
 	startedAt?: number;
 	finishedAt?: number;
+	/** Exact worker text. Sensitive: persisted for audit, never returned downstream. */
+	rawOutput?: string;
+	/** Scanned text representation safe for downstream prompts. */
 	output?: string;
+	scanFindings: OutputScanFinding[];
+	invocationHash?: string;
+	resultHash?: string;
+	dependencies?: string[];
+	cacheGeneration?: number;
+	cached?: boolean;
 	error?: string;
 	flags: string[];
 	usage: UsageStats;
@@ -107,13 +150,19 @@ export interface WorkflowSpec {
 	why: string;
 	goal: string;
 	prompt: string;
+	/** Copied JSON arguments exposed to the orchestration script as global `args`. */
+	args?: unknown;
 	script: string;
 	recipe?: string;
-	modelFamily?: ModelFamilyPolicy;
-	userModelInstruction?: string;
+	modelPolicy: WorkflowModelPolicy;
+	size?: WorkflowSize;
+	budgets?: {
+		maxAgents?: number;
+		maxTokens?: number;
+		maxCost?: number;
+	};
 	concurrency?: number;
 	background?: boolean;
-	approval?: "prompt" | "skip";
 	timeoutMs?: number;
 	/** Retries after a failed child attempt. Defaults to 3. */
 	maxRetries?: number;
@@ -143,6 +192,17 @@ export interface WorkflowRun {
 	logs: WorkflowLogEntry[];
 	droppedLogEvents?: number;
 	artifactPath?: string;
+	scriptHash?: string;
+	/** Agent IDs explicitly invalidated by a user restart before the next execution. */
+	cacheInvalidations?: string[];
+	budget?: {
+		maxAgents: number;
+		maxTokens?: number;
+		maxCost?: number;
+		projectedTokens: number;
+		warnings: string[];
+		exhausted?: string;
+	};
 }
 
 export interface ChildResult {
@@ -158,7 +218,10 @@ export interface ChildResult {
 export interface WorkflowController {
 	pause(): void;
 	resume(): void;
+	/** Stop current workers while retaining same-session resume/cache state. */
 	stop(): void;
+	/** Terminate current workers and mark the run terminal, without a normal resume path. */
+	hardStop(): void;
 	stopAgent(id: string): void;
 	restartAgent(id: string): void;
 }

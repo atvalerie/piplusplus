@@ -37,6 +37,32 @@ test("sandbox preserves dependent and parallel JavaScript orchestration", async 
 	assert.deepEqual(calls, [["alpha", "Research"], ["beta", "Research"]]);
 });
 
+test("sandbox marshals structured agent objects, arrays, scalars, and null as guest values", async () => {
+	const result = await executeSandboxedWorkflow(`
+		const object = await agent("object");
+		const array = await agent("array");
+		const scalar = await agent("scalar");
+		const nullable = await agent("null");
+		return { nested: object.user.name, second: array[1], scalar, nullable, objectType: typeof object };
+	`, bindings(async (prompt) => ({
+		object: { user: { name: "Ada" } },
+		array: ["first", 2],
+		scalar: true,
+		null: null,
+	}[String(prompt)])), { timeoutMs: 2_000 });
+	assert.deepEqual(result, { nested: "Ada", second: 2, scalar: true, nullable: null, objectType: "object" });
+});
+
+test("sandbox exposes structured workflow args as copied guest data", async () => {
+	const supplied = { topic: "routing", nested: { count: 2 }, items: ["a", "b"] };
+	const result = await executeSandboxedWorkflow(`
+		args.nested.count += 1;
+		return { topic: args.topic, count: args.nested.count, second: args.items[1] };
+	`, { ...bindings(), args: supplied }, { timeoutMs: 2_000 });
+	assert.deepEqual(result, { topic: "routing", count: 3, second: "b" });
+	assert.deepEqual(supplied, { topic: "routing", nested: { count: 2 }, items: ["a", "b"] });
+});
+
 test("sandbox interrupts synchronous infinite loops at the wall-clock deadline", async () => {
 	let timedOut = 0;
 	await assert.rejects(

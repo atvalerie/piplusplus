@@ -11,7 +11,7 @@ import { zeroUsage, type AgentState, type WorkflowRun } from "../extensions/work
 function agent(overrides: Partial<AgentState> = {}): AgentState {
 	return {
 		id: "researcher", label: "Researcher", phase: "Research", prompt: "Inspect architecture", kind: "research",
-		status: "completed", createdAt: 1, startedAt: 2, finishedAt: 3, output: "Architecture output", flags: [],
+		status: "completed", createdAt: 1, startedAt: 2, finishedAt: 3, rawOutput: "Architecture output", output: "Architecture output", scanFindings: [], flags: [],
 		usage: { ...zeroUsage(), input: 100, output: 20, turns: 1 }, toolCalls: [{ name: "read", args: { path: "README.md" } }],
 		messages: [], events: [], logs: [{ at: 2, type: "process_start" }, { at: 3, type: "process_exit", message: "0" }], attempt: 1,
 		...overrides,
@@ -22,6 +22,7 @@ function run(agents: AgentState[]): WorkflowRun {
 	return {
 		id: "wf_test", sessionId: "session", cwd: "/repo", spec: {
 			name: "Audit", why: "Parallel research", goal: "Report", prompt: "Audit repository", script: "return await agent('Inspect architecture')",
+			modelPolicy: { defaultRouting: "inherit", rationale: "Use the session model." },
 		},
 		status: "completed", createdAt: 1, startedAt: 2, finishedAt: 4, currentPhase: "Research", phases: ["Research"], agents,
 		result: "Final summary", flags: [], usage: agents.reduce((usage, item) => ({ ...usage, input: usage.input + item.usage.input, output: usage.output + item.usage.output, turns: usage.turns + item.usage.turns }), zeroUsage()),
@@ -55,12 +56,16 @@ test("unverified workflows produce one consolidated parent-agent handoff", async
 	const artifactPath = await writeWorkflowArtifact(workflow, directory);
 	assert.equal(artifactPath, path.join(directory, "wf_test.json"));
 	const artifact = JSON.parse(fs.readFileSync(artifactPath!, "utf8"));
+	assert.equal(artifact.schemaVersion, 6);
 	assert.equal(artifact.kind, "piplusplus.workflow.state");
+	assert.equal(artifact.workflow.modelPolicy.defaultRouting, "inherit");
 	assert.equal(artifact.execution.verification.present, false);
 	assert.equal(artifact.execution.agentCount, 1);
 	assert.equal(artifact.summary, "Final summary");
 	assert.equal(artifact.agents[0].prompt, "Inspect architecture");
 	assert.equal(artifact.agents[0].output, "Architecture output");
+	assert.equal(artifact.agents[0].rawOutput, "Architecture output");
+	assert.deepEqual(artifact.agents[0].scanFindings, []);
 	assert.equal(artifact.agents[0].logs.length, 2);
 	assert.equal(artifact.agents[0].rawEvents[0].event.message.content[0].text, "Architecture output");
 	assert.equal(artifact.logs.length, 2);

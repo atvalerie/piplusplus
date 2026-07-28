@@ -17,17 +17,17 @@ export async function writeWorkflowArtifact(run: WorkflowRun, directory: string)
 	const target = path.join(directory, `${run.id}.json`);
 	run.artifactPath = target;
 	const verificationAgents = run.agents.filter((agent) => agent.startedAt !== undefined && (agent.kind === "verification" || verificationLike(agent.phase)));
-	const statusCounts = Object.fromEntries(["queued", "running", "completed", "flagged", "failed", "stopped"].map((status) => [
+	const statusCounts = Object.fromEntries(["queued", "running", "completed", "flagged", "budget_exhausted", "failed", "stopped"].map((status) => [
 		status,
 		run.agents.filter((agent) => agent.status === status).length,
 	]));
 	const artifact = {
-		schemaVersion: 2,
+		schemaVersion: 6,
 		kind: "piplusplus.workflow.state",
 		reason: "Continuously updated workflow source of truth for live inspection and final handoff.",
 		workflow: {
-			id: run.id, name: run.spec.name, recipe: run.spec.recipe, modelFamily: run.spec.modelFamily, why: run.spec.why, goal: run.spec.goal, prompt: run.spec.prompt,
-			userModelInstruction: run.spec.userModelInstruction, script: run.spec.script, concurrency: run.spec.concurrency ?? 4,
+			id: run.id, name: run.spec.name, recipe: run.spec.recipe, modelPolicy: run.spec.modelPolicy, why: run.spec.why, goal: run.spec.goal, prompt: run.spec.prompt, args: run.spec.args,
+			script: run.spec.script, scriptHash: run.scriptHash, size: run.spec.size, budgets: run.spec.budgets, concurrency: run.spec.concurrency ?? 4,
 			timeoutMs: run.spec.timeoutMs ?? 30 * 60_000, maxRetries: run.spec.maxRetries ?? 3, retryBaseMs: run.spec.retryBaseMs ?? 1_000,
 			cwd: run.cwd, sessionId: run.sessionId,
 		},
@@ -35,19 +35,20 @@ export async function writeWorkflowArtifact(run: WorkflowRun, directory: string)
 			status: run.status, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt,
 			currentPhase: run.currentPhase, phases: run.phases,
 			verification: { present: verificationAgents.length > 0, executedAgents: verificationAgents.length, agentIds: verificationAgents.map((agent) => agent.id) },
-			agentCount: run.agents.length, agentStatusCounts: statusCounts, usage: run.usage,
+			agentCount: run.agents.length, agentStatusCounts: statusCounts, usage: run.usage, budget: run.budget,
 			droppedLogEvents: run.droppedLogEvents ?? 0, flags: run.flags, error: run.error,
 		},
 		summary: run.fullResult ?? run.result ?? run.error ?? (run.status === "running" || run.status === "queued" || run.status === "paused" ? "Workflow is still in progress." : "No workflow result was returned."),
 		agents: run.agents.map((agent) => ({
 			id: agent.id, label: agent.label, phase: agent.phase, kind: agent.kind, prompt: agent.prompt,
-			requestedModel: agent.requestedModel, resolvedModel: agent.resolvedModel, modelRationale: agent.modelRationale,
-			thinking: agent.thinking, tools: agent.tools, profile: agent.profile, writePaths: agent.writePaths, status: agent.status, attempt: agent.attempt, nextRetryAt: agent.nextRetryAt,
+			requestedModel: agent.requestedModel, resolvedModel: agent.resolvedModel, reportedModel: agent.reportedModel, modelRationale: agent.modelRationale,
+			thinking: agent.thinking, tools: agent.tools, profile: agent.profile, writePaths: agent.writePaths, maxTurns: agent.maxTurns, schema: agent.schema, status: agent.status, attempt: agent.attempt, nextRetryAt: agent.nextRetryAt,
 			createdAt: agent.createdAt, startedAt: agent.startedAt, finishedAt: agent.finishedAt, usage: agent.usage,
 			flags: agent.flags, toolCalls: agent.toolCalls,
+			cache: { cached: agent.cached ?? false, invocationHash: agent.invocationHash, resultHash: agent.resultHash, generation: agent.cacheGeneration ?? 0, dependencies: agent.dependencies ?? [] },
 			messages: agent.messages ?? [], rawEvents: agent.events ?? [], droppedEvents: agent.droppedEvents ?? 0,
 			logs: agent.logs, droppedLogEvents: agent.droppedLogEvents ?? 0,
-			output: agent.output, structuredOutput: agent.structuredOutput, error: agent.error,
+			rawOutput: agent.rawOutput, output: agent.output, structuredOutput: agent.structuredOutput, scanFindings: agent.scanFindings ?? [], error: agent.error,
 		})),
 		logs: run.logs,
 	};

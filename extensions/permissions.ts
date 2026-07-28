@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { explainPermission } from "./workflows/permissions.ts";
+import { acceptEditsAutoApproves, explainPermission } from "./workflows/permissions.ts";
 import { installPermissionService, removePermissionService, type GlobalPermissionMode, type PermissionService } from "./shared/permission-service.ts";
 import type { PermissionRequest } from "./workflows/types.ts";
 import { Key } from "@earendil-works/pi-tui";
@@ -20,6 +20,7 @@ const MODE_DESCRIPTIONS: Record<GlobalPermissionMode, string> = {
 export default function permissionsExtension(pi: ExtensionAPI) {
 	if (process.env[CHILD_ENV] === "1") return;
 	const configPath = path.join(getAgentDir(), "piplusplus-permissions.json");
+	const workflowArtifactRoot = path.join(getAgentDir(), "workflows", "artifacts");
 	let mode: GlobalPermissionMode = "manual";
 	let configuredMode: GlobalPermissionMode = "manual";
 	const availableModes = new Set<GlobalPermissionMode>(BASE_MODES);
@@ -56,15 +57,15 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		},
 		subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
 		async authorize(request, suppliedContext, options) {
-			if (mode === "dangerous") return true;
 			const ctx = suppliedContext ?? currentContext;
 			const cwd = ctx?.cwd ?? process.cwd();
-			const policyMode = mode === "plan" || mode === "accept-edits" ? "auto" : mode;
-			const decision = explainPermission(request, cwd, policyMode);
+			const policyMode = mode === "plan" || mode === "accept-edits" ? "auto" : mode === "dangerous" ? "manual" : mode;
+			const decision = explainPermission(request, cwd, policyMode, { artifactRoots: [workflowArtifactRoot] });
+			if (mode === "dangerous" && !options?.forcePrompt) return true;
+			if (decision.hardDeny) return false;
 			if (mode === "plan") return decision.risk === "safe" && decision.allow;
 			if (mode === "accept-edits") {
-				if ((request.toolName === "write" || request.toolName === "edit") && !options?.forcePrompt) return true;
-				if (["read", "grep", "find", "ls"].includes(request.toolName)) return true;
+				if (acceptEditsAutoApproves(request, decision) && !options?.forcePrompt) return true;
 			} else if (decision.automatic && !options?.forcePrompt) return decision.allow;
 			if (!ctx?.hasUI) return false;
 			const input = request.toolName === "bash" ? String(request.input.command ?? "") : JSON.stringify(request.input, null, 2);

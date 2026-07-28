@@ -5,16 +5,22 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text, type Terminal } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { workflowApprovalSummary } from "./approval.ts";
 import { writeWorkflowArtifact } from "./artifact.ts";
 import { getPermissionService } from "../shared/permission-service.ts";
 import { installWorkflowDockService, removeWorkflowDockService, type WorkflowDockService } from "../shared/workflow-dock-service.ts";
-import { inferModelFamilyInstruction, modelCatalogText, serializeModels } from "./models.ts";
-import { explainPermission, isPathWithinWriteScope } from "./permissions.ts";
+import { migrateWorkflowRun } from "./migration.ts";
+import { filterSupportedWorkflowModels, modelCatalogText, serializeModels, SUPPORTED_WORKFLOW_PROVIDERS } from "./models.ts";
+import { explainPermission, isPathWithinWriteScope, mutationOverlapsWriteScopes, scopedToolRequiresExplicitApproval } from "./permissions.ts";
 import { PROFILE_NAMES } from "./profiles.ts";
 import { compileWorkflowRecipe, WORKFLOW_RECIPE_NAMES } from "./recipes.ts";
 import { createWorkflowController, validateWorkflowScript } from "./runtime.ts";
+import { createSavedWorkflowSource, loadSavedWorkflows, normalizeWorkflowArgs, parseSavedWorkflowArgs, savedWorkflowDirectories, saveWorkflowSource, type SavedWorkflow } from "./saved.ts";
+import { DEFAULT_WORKFLOW_SETTINGS, isInteractiveUltracodeTrigger, loadWorkflowSettings, saveWorkflowSettings, type WorkflowSettings } from "./settings.ts";
+import { buildWorkflowSystemInstructions, workflowPolicyContext } from "./system-prompt.ts";
 import { Surface } from "../../ui/primitives/surface.ts";
 import { WorkflowBrowser } from "./tui.ts";
+import { headlessWorkflowLaunchAllowed, isWorkflowTrusted, trustWorkflowFromUserAction, workflowTrustIdentity } from "./trust.ts";
 import { aggregateUsage, type AgentState, type PermissionRequest, type ThinkingLevel, type WorkflowController, type WorkflowRun, type WorkflowSpec, zeroUsage } from "./types.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
@@ -22,18 +28,35 @@ const WIDGET_ID = "piplusplus-workflows";
 const MAX_RUN_LOG_EVENTS = 100_000;
 const retentionDays = Math.max(1, Math.min(365, Number.parseInt(process.env.PIPLUSPLUS_WORKFLOW_RETENTION_DAYS ?? "30", 10) || 30));
 
-const WorkflowSchema = Type.Object({
+export const WorkflowSchema = Type.Object({
 	name: Type.String({ description: "Short workflow name" }),
 	why: Type.String({ description: "Why code-mode orchestration is better than one main-agent context for this task" }),
 	goal: Type.String({ description: "Concrete definition of done" }),
 	prompt: Type.String({ description: "The original task or workflow-level objective. Individual agent() calls still receive their own distinct prompts." }),
+	args: Type.Optional(Type.Unknown({ description: "Copied JSON data exposed to custom and saved workflow scripts as global args." })),
 	script: Type.Optional(Type.String({ description: "Deterministic JavaScript body using agent(), parallel(), pipeline(), phase(), approve(), models(), workflowPrompt, and return. Omit when using recipe." })),
 	recipe: Type.Optional(StringEnum(WORKFLOW_RECIPE_NAMES)),
-	modelFamily: Type.Optional(StringEnum(["gpt", "openai", "claude"] as const)),
-	userModelInstruction: Type.Optional(Type.String({ description: "Verbatim model preference stated by the user, if any" })),
+	modelPolicy: Type.Object({
+		defaultRouting: StringEnum(["inherit", "auto"] as const),
+		allowedProviders: Type.Optional(Type.Array(StringEnum(SUPPORTED_WORKFLOW_PROVIDERS), {
+			minItems: 1,
+			uniqueItems: true,
+			description: "Hard provider/source groups: opencode-go, anthropic, openai, or modelhub. ModelHub key aliases collapse to modelhub.",
+		})),
+		allowedFamilies: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true, description: "Exact lowercase family values from workflow_models, such as openai or anthropic." })),
+		allowedModels: Type.Optional(Type.Array(Type.String(), { minItems: 1, uniqueItems: true })),
+		rationale: Type.String({ description: "Why this routing policy follows the user's request. Interpret the request semantically in any language; do not rely on keywords." }),
+	}, { description: "The orchestrating model's structured routing decision. Runtime-enforced allowlists are hard constraints." }),
+	size: Type.Optional(StringEnum(["small", "medium", "large", "unrestricted"] as const, {
+		description: "Generation guidance: small <5 agents, medium <15, large <50, unrestricted up to runtime caps.",
+	})),
+	budgets: Type.Optional(Type.Object({
+		maxAgents: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
+		maxTokens: Type.Optional(Type.Integer({ minimum: 1, description: "Hard cap on consumed input, output, cache-read, and cache-write tokens." })),
+		maxCost: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "Hard cap on reported workflow cost." })),
+	}, { additionalProperties: false, description: "Hard workflow budgets. Exhaustion prevents new workers from starting while already-running workers may finish." })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
 	background: Type.Optional(Type.Boolean({ description: "Run without blocking the conversation; default true" })),
-	approval: Type.Optional(StringEnum(["prompt", "skip"] as const)),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 86_400_000, description: "Parent-enforced workflow wall-clock deadline" })),
 	maxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 10, description: "Retries per failed subagent; default 3" })),
 	retryBaseMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 60_000, description: "Initial exponential retry delay; default 1000ms" })),
@@ -55,7 +78,7 @@ function summary(run: WorkflowRun): string {
 }
 
 function icon(status: string): string {
-	return ({ queued: "○", running: "⏳", paused: "Ⅱ", completed: "✓", completed_with_flags: "⚑", failed: "✗", stopped: "■" } as Record<string, string>)[status] ?? "·";
+	return ({ queued: "○", running: "⏳", paused: "Ⅱ", completed: "✓", completed_with_flags: "⚑", budget_exhausted: "⚠", failed: "✗", stopped: "■" } as Record<string, string>)[status] ?? "·";
 }
 
 export default function workflowsExtension(pi: ExtensionAPI) {
@@ -66,17 +89,51 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const artifactTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	const artifactQueues = new Map<string, Promise<void>>();
+	const savedWorkflows = new Map<string, SavedWorkflow>();
+	const registeredSavedCommands = new Set<string>();
 	const stateDir = path.join(getAgentDir(), "workflows", "runs");
 	const artifactDir = path.join(getAgentDir(), "workflows", "artifacts");
 	let ctxNow: ExtensionContext | undefined;
 	let restoreThinking: ThinkingLevel | undefined;
-	let pendingUltracodeTriggers = 0;
+	const pendingUltracodeTriggers: boolean[] = [];
+	let workflowSettings: WorkflowSettings = { ...DEFAULT_WORKFLOW_SETTINGS };
 	let counter = 0;
 
 	const orderedRuns = () => [...runs.values()].sort((a, b) => b.createdAt - a.createdAt);
 
+	async function saveWorkflowRun(runId: string, ctx: ExtensionContext): Promise<void> {
+		const run = runs.get(runId);
+		if (!run) { ctx.ui.notify(`Unknown workflow: ${runId}`, "error"); return; }
+		const suggested = run.spec.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "workflow";
+		const enteredName = await ctx.ui.input(`Save workflow name (default: ${suggested})`, "lowercase-name");
+		if (enteredName === undefined) return;
+		const name = enteredName.trim() || suggested;
+		const enteredDescription = await ctx.ui.input(`Description (default: ${run.spec.goal.slice(0, 120)})`, "what this workflow does");
+		if (enteredDescription === undefined) return;
+		const description = enteredDescription.trim() || run.spec.goal.slice(0, 500);
+		const selectedScope = await ctx.ui.select("Save workflow scope", [
+			"Project — .pi/workflows",
+			"Personal — ~/.pi/agent/workflows",
+			"Cancel",
+		]);
+		if (!selectedScope || selectedScope === "Cancel") return;
+		const scope = selectedScope.startsWith("Project") ? "project" : "personal";
+		try {
+			const source = createSavedWorkflowSource(run.spec, name, description);
+			const directories = savedWorkflowDirectories(ctx.cwd, getAgentDir());
+			const target = path.join(directories[scope], `${name}.js`);
+			if (fs.existsSync(target) && !await ctx.ui.confirm("Replace saved workflow?", `${target}\n\nThis overwrites the existing saved workflow source.`)) return;
+			const saved = await saveWorkflowSource(scope, name, source, ctx.cwd, getAgentDir());
+			await refreshSavedWorkflowCommands(ctx);
+			ctx.ui.notify(`Saved /${saved.meta.name} as a ${scope} workflow.`, "info");
+		} catch (error) {
+			ctx.ui.notify(`Could not save workflow: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	}
+
 	const openWorkflowDock = async (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") { ctx.ui.notify(orderedRuns().map((run) => `${run.id} ${run.status} ${run.spec.name}`).join("\n") || "No workflows", "info"); return; }
+		const editorBuffer = ctx.ui.getEditorText();
 		let mouseTerminal: Terminal | undefined;
 		try {
 			await ctx.ui.custom<void>((tui, theme, _keys, done) => {
@@ -85,12 +142,23 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				let timer: ReturnType<typeof setInterval>;
 				const close = () => { clearInterval(timer); done(); };
 				const height = Math.max(9, Math.floor(tui.terminal.rows * 0.45) - 2);
-				const browser = new WorkflowBrowser(orderedRuns, controllers, theme, close, height);
+				const browser = new WorkflowBrowser(
+					orderedRuns,
+					controllers,
+					theme,
+					close,
+					height,
+					(runId, restartAgentId) => { void resumeWorkflow(runId, restartAgentId); },
+					(runId) => { close(); void saveWorkflowRun(runId, ctx); },
+				);
 				const panel = new Surface({ theme, body: browser, border: "frame", borderTone: "accent", padding: { top: 0, right: 1, bottom: 0, left: 1 }, background: "panel" });
 				timer = setInterval(() => tui.requestRender(), 250);
 				return { render: (width) => panel.render(width), invalidate: () => panel.invalidate(), handleInput: (data) => { browser.handleInput(data); tui.requestRender(); } };
 			}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "48%", anchor: "bottom-center", margin: { top: 0, right: 0, bottom: 0, left: 0 } } });
-		} finally { mouseTerminal?.write("\x1b[?1006l\x1b[?1000l"); }
+		} finally {
+			mouseTerminal?.write("\x1b[?1006l\x1b[?1000l");
+			ctx.ui.setEditorText(editorBuffer);
+		}
 	};
 	const dockService: WorkflowDockService = { hasRuns: () => [...runs.values()].some((run) => ["queued", "running", "paused"].includes(run.status)), open: openWorkflowDock };
 	installWorkflowDockService(dockService);
@@ -147,7 +215,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		if (run.logs.length < MAX_RUN_LOG_EVENTS) run.logs.push({ at: Date.now(), event, phase: run.currentPhase, status: run.status, agentId: agent?.id, agentStatus: agent?.status });
 		else run.droppedLogEvents = (run.droppedLogEvents ?? 0) + 1;
 		run.usage = aggregateUsage(run.agents);
-		const terminal = ["completed", "completed_with_flags", "failed", "stopped"].includes(run.status);
+		const terminal = ["completed", "completed_with_flags", "budget_exhausted", "failed", "stopped"].includes(run.status);
 		schedulePersist(run, terminal);
 		scheduleArtifact(run, terminal);
 		refreshUi();
@@ -161,29 +229,101 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	async function requestPermission(run: WorkflowRun, request: PermissionRequest): Promise<boolean> {
 		const service = getPermissionService();
 		const mode = service?.getMode() ?? "read-only";
-		const decision = explainPermission(request, run.cwd, mode);
+		const policyMode = mode === "plan" || mode === "accept-edits" ? "auto" : mode === "dangerous" ? "manual" : mode;
+		const decision = explainPermission(request, run.cwd, policyMode, { artifactRoots: [artifactDir] });
 		const agent = run.agents.find((candidate) => candidate.id === request.agentId);
+		if (decision.hardDeny) {
+			agent?.logs.push({ at: Date.now(), type: "permission_denied", tool: request.toolName, message: decision.explanation });
+			return false;
+		}
 		if (agent?.writePaths && (request.toolName === "write" || request.toolName === "edit") && !isPathWithinWriteScope(run.cwd, request.input.path, agent.writePaths)) {
 			agent.logs.push({ at: Date.now(), type: "permission_denied", tool: request.toolName, message: `Target is outside declared write scope: ${agent.writePaths.join(", ")}` });
 			return false;
 		}
 		agent?.logs.push({ at: Date.now(), type: "permission_request", tool: request.toolName, message: `${mode}/${decision.risk}: ${decision.explanation}` });
-		const concurrentMutation = (request.toolName === "write" || request.toolName === "edit") && run.agents.filter((candidate) => candidate.status === "running").length > 1;
-		const allow = service ? await service.authorize(request, ctxNow, concurrentMutation ? { forcePrompt: true, reason: "Multiple workflow agents are active; concurrent writes can conflict." } : undefined) : decision.allow;
+		const otherRunningAgents = run.agents.filter((candidate) => candidate.id !== request.agentId && candidate.status === "running");
+		const overlappingMutation = (request.toolName === "write" || request.toolName === "edit")
+			&& mutationOverlapsWriteScopes(run.cwd, request.input.path, otherRunningAgents.map((candidate) => candidate.writePaths));
+		const scopedUnconfinedTool = scopedToolRequiresExplicitApproval(request, agent?.writePaths);
+		const reasons = [
+			overlappingMutation ? "Another running workflow agent may mutate the same declared path; concurrent overlapping writes require an explicit decision." : undefined,
+			scopedUnconfinedTool && request.toolName === "bash" ? "This shell command executes with the user's OS account and cannot be confined to writePaths; approval explicitly acknowledges that the declared path scope is not an OS sandbox." : undefined,
+			scopedUnconfinedTool && request.toolName !== "bash" ? "This custom tool has no enforceable writePaths boundary; approval explicitly acknowledges its effects may escape the declared scope." : undefined,
+		].filter((reason): reason is string => Boolean(reason));
+		const allow = service
+			? await service.authorize(request, ctxNow, reasons.length ? { forcePrompt: true, reason: reasons.join("\n") } : undefined)
+			: decision.allow;
 		agent?.logs.push({ at: Date.now(), type: allow ? "permission_allowed" : "permission_denied", tool: request.toolName, message: service ? `global ${mode} policy` : "global permission extension unavailable; read-only fallback" });
 		return allow;
 	}
 
+	const resumeWorkflow = async (runId: string, restartAgentId?: string): Promise<void> => {
+		const run = runs.get(runId);
+		if (!run) { notify(`Unknown workflow: ${runId}`, "error"); return; }
+		if (restartAgentId) run.cacheInvalidations = [...new Set([...(run.cacheInvalidations ?? []), restartAgentId])];
+		const resumable = run.status === "stopped"
+			|| (["completed", "completed_with_flags", "budget_exhausted", "failed"].includes(run.status) && Boolean(run.cacheInvalidations?.length));
+		if (!resumable) { notify(`Workflow ${runId} is ${run.status}; only stopped runs or explicitly restarted agents can resume.`, "warning"); return; }
+		const ctx = ctxNow;
+		if (!ctx) { notify(`Workflow ${runId} cannot resume without an active Pi session.`, "error"); return; }
+		await ctx.modelRegistry.refresh();
+		const models = filterSupportedWorkflowModels(ctx.modelRegistry.getAvailable() as Model[]);
+		const runtime = createWorkflowController(run, models, ctx.model, {
+			changed: (event, agent) => changed(run, event, agent),
+			notify,
+			requestPermission: (request) => requestPermission(run, request),
+			requestApproval: async (title, detail) => {
+				if (!ctx.hasUI) return false;
+				const shown = detail.length > 12_000 ? `${detail.slice(0, 12_000)}\n…` : detail;
+				const choice = await ctx.ui.select(`${title}\n\n${shown}`, ["Approve and continue", "Reject and stop"]);
+				return choice === "Approve and continue";
+			},
+		});
+		controllers.set(run.id, runtime.controller);
+		changed(run, "resume_requested");
+		void runtime.execute().then(async () => {
+			await writeArtifactNow(run);
+			await persistNow(run);
+			const level = run.status === "failed" ? "error" : run.status === "completed_with_flags" || run.status === "budget_exhausted" ? "warning" : "info";
+			notify(`Workflow ${run.status.replaceAll("_", " ")} after resume: ${run.spec.name} · ${summary(run)}`, level);
+			if (["completed", "completed_with_flags", "budget_exhausted", "failed"].includes(run.status)) {
+				const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting:\n${run.artifactPath}` : "";
+				pi.sendMessage({
+					customType: "piplusplus-workflow-result",
+					content: `Workflow ${run.id} (${run.spec.name}) ${run.status} after resume.\n${workflowPolicyContext(run.spec.modelPolicy)}\n\n${run.result ?? run.error ?? "No result"}\n\n${summary(run)}${run.flags.length ? `\nFlags:\n- ${run.flags.join("\n- ")}` : ""}${handoff}`,
+					display: true,
+					details: { runId: run.id, status: run.status, artifactPath: run.artifactPath },
+				}, { triggerTurn: true, deliverAs: "followUp" });
+			}
+		});
+	};
+
 	async function approve(spec: WorkflowSpec, ctx: ExtensionContext): Promise<WorkflowSpec | undefined> {
-		if (spec.approval === "skip" || !ctx.hasUI) return spec;
+		if (!ctx.hasUI) return headlessWorkflowLaunchAllowed() ? spec : undefined;
 		while (true) {
-			const choice = await ctx.ui.select(`Workflow: ${spec.name}`, [
-				`Run — ${spec.why}`,
-				"View/edit JavaScript",
+			try {
+				if (await isWorkflowTrusted(spec, ctx.cwd, getAgentDir())) return spec;
+			} catch (error) {
+				ctx.ui.notify(`Could not read workflow trust store: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			}
+			const identity = workflowTrustIdentity(spec, ctx.cwd);
+			const choice = await ctx.ui.select(`${workflowApprovalSummary(spec)}\nTrust identity: ${identity.scriptHash.slice(0, 12)} · ${identity.projectPath}`, [
+				"Run once",
+				"Run and trust this exact script in this project",
+				"View/edit raw JavaScript",
 				"Cancel",
 			]);
 			if (!choice || choice === "Cancel") return undefined;
-			if (choice.startsWith("Run")) return spec;
+			if (choice === "Run once") return spec;
+			if (choice.startsWith("Run and trust")) {
+				try {
+					await trustWorkflowFromUserAction(spec, ctx.cwd, getAgentDir());
+					ctx.ui.notify(`Trusted exact workflow script ${identity.scriptHash.slice(0, 12)} for this project.`, "info");
+				} catch (error) {
+					ctx.ui.notify(`Workflow will run once, but trust could not be saved: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				}
+				return spec;
+			}
 			const edited = await ctx.ui.editor(`JavaScript workflow: ${spec.name}`, spec.script);
 			if (edited !== undefined) {
 				const error = validateWorkflowScript(edited);
@@ -193,14 +333,122 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	const launchApprovedWorkflow = async (
+		spec: WorkflowSpec,
+		ctx: ExtensionContext,
+		signal?: AbortSignal,
+		onUpdate?: (update: any) => void,
+	) => {
+		spec.args = normalizeWorkflowArgs(spec.args);
+		await ctx.modelRegistry.refresh();
+		const models = filterSupportedWorkflowModels(ctx.modelRegistry.getAvailable() as Model[]);
+		const runId = `wf_${Date.now().toString(36)}_${(++counter).toString(36)}`;
+		const run: WorkflowRun = {
+			id: runId,
+			sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, spec, status: "queued", createdAt: Date.now(),
+			currentPhase: "Starting", phases: [], agents: [], flags: [], usage: zeroUsage(), paused: false, logs: [],
+			artifactPath: path.join(artifactDir, `${runId}.json`),
+		};
+		runs.set(run.id, run);
+		const runtime = createWorkflowController(run, models, ctx.model, {
+			changed: (event, agent) => {
+				changed(run, event, agent);
+				onUpdate?.({ content: [{ type: "text", text: `${icon(run.status)} ${run.spec.name} · ${run.currentPhase} · ${run.agents.length} agents` }], details: { runId: run.id, status: run.status } });
+			},
+			notify,
+			requestPermission: (request) => requestPermission(run, request),
+			requestApproval: async (title, detail) => {
+				if (!ctx.hasUI) return false;
+				const shown = detail.length > 12_000 ? `${detail.slice(0, 12_000)}\n…` : detail;
+				const choice = await ctx.ui.select(`${title}\n\n${shown}`, ["Approve and continue", "Reject and stop"]);
+				return choice === "Approve and continue";
+			},
+		});
+		controllers.set(run.id, runtime.controller);
+		changed(run, "created");
+		const initialArtifactTimer = artifactTimers.get(run.id);
+		if (initialArtifactTimer) clearTimeout(initialArtifactTimer);
+		artifactTimers.delete(run.id);
+		await writeArtifactNow(run);
+		const background = spec.background ?? true;
+		const promise = runtime.execute().then(async () => {
+			await writeArtifactNow(run);
+			await persistNow(run);
+			const level = run.status === "failed" ? "error" : run.status === "completed_with_flags" || run.status === "budget_exhausted" ? "warning" : "info";
+			notify(`Workflow ${run.status.replaceAll("_", " ")}: ${run.spec.name} · ${summary(run)}`, level);
+			if (background) {
+				const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting; it is the source of truth and remains available throughout execution:\n${run.artifactPath}` : "";
+				pi.sendMessage({
+					customType: "piplusplus-workflow-result",
+					content: `Workflow ${run.id} (${run.spec.name}) ${run.status}.\n${workflowPolicyContext(run.spec.modelPolicy)}\n\n${run.result ?? run.error ?? "No result"}\n\n${summary(run)}${run.flags.length ? `\nFlags:\n- ${run.flags.join("\n- ")}` : ""}${handoff}`,
+					display: true,
+					details: { runId: run.id, status: run.status, artifactPath: run.artifactPath },
+				}, { triggerTurn: true, deliverAs: "followUp" });
+			}
+		});
+		if (background) {
+			void promise;
+			return { content: [{ type: "text" as const, text: `Started JavaScript workflow ${run.id}: ${run.spec.name}.\n${workflowPolicyContext(run.spec.modelPolicy)}\nUse /workflows for live UI or read the continuously updated workflow JSON at any time:\n${run.artifactPath}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath } };
+		}
+		const abort = () => runtime.controller.stop();
+		signal?.addEventListener("abort", abort, { once: true });
+		await promise;
+		signal?.removeEventListener("abort", abort);
+		const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting:\n${run.artifactPath}` : "";
+		return { content: [{ type: "text" as const, text: `${run.result ?? run.error ?? "No result"}\n\n${run.status} · ${summary(run)}\n${workflowPolicyContext(run.spec.modelPolicy)}${handoff}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath, run } };
+	};
+
+	const refreshSavedWorkflowCommands = async (ctx: ExtensionContext): Promise<void> => {
+		const loaded = await loadSavedWorkflows(ctx.cwd, getAgentDir());
+		savedWorkflows.clear();
+		for (const [name, workflow] of loaded.workflows) savedWorkflows.set(name, workflow);
+		for (const error of loaded.errors) notify(`Saved workflow skipped: ${error}`, "warning");
+		const occupied = new Set(pi.getCommands().map((command) => command.name));
+		for (const workflow of savedWorkflows.values()) {
+			const name = workflow.meta.name;
+			if (occupied.has(name) && !registeredSavedCommands.has(name)) {
+				notify(`Saved workflow /${name} was not registered because that command name is already in use.`, "warning");
+				continue;
+			}
+			pi.registerCommand(name, {
+				description: `${workflow.meta.description} [saved ${workflow.scope} workflow; args: JSON]`,
+				handler: async (rawArgs, commandContext) => {
+					const current = savedWorkflows.get(name);
+					if (!current) { commandContext.ui.notify(`Saved workflow /${name} is no longer available.`, "error"); return; }
+					let args: unknown;
+					try { args = parseSavedWorkflowArgs(rawArgs); }
+					catch (error) { commandContext.ui.notify(error instanceof Error ? error.message : String(error), "error"); return; }
+					const prompt = args && typeof args === "object" && !Array.isArray(args) && typeof (args as Record<string, unknown>).prompt === "string"
+						? String((args as Record<string, unknown>).prompt)
+						: `Run saved workflow /${name} with args:\n${JSON.stringify(args, null, 2)}`;
+					const spec: WorkflowSpec = {
+						name: current.meta.name,
+						why: `The user invoked saved ${current.scope} workflow /${name}.`,
+						goal: current.meta.description,
+						prompt,
+						args,
+						script: current.script,
+						background: true,
+						modelPolicy: { defaultRouting: "inherit", rationale: "Saved workflows use Claude-compatible session-model inheritance unless their script routes an agent explicitly." },
+					};
+					const approved = await approve(spec, commandContext);
+					if (!approved) { commandContext.ui.notify(`Saved workflow /${name} canceled.`, "info"); return; }
+					const result = await launchApprovedWorkflow(approved, commandContext);
+					commandContext.ui.notify(result.content[0]?.text ?? `Started /${name}.`, "info");
+				},
+			});
+			registeredSavedCommands.add(name);
+		}
+	};
+
 	pi.registerTool({
 		name: "workflow_models",
 		label: "Workflow Models",
-		description: "Return the current authenticated Pi model catalog with capability, context, output, and price metadata. Use before assigning workflow subagents when model choice matters.",
+		description: "Return authenticated workflow models from OpenCode Go, Anthropic, OpenAI, and ModelHub with provider group, family, capability, context, output, and price metadata. Use before assigning workflow subagents when model choice matters.",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal, _update, ctx) {
 			await ctx.modelRegistry.refresh();
-			const models = serializeModels(ctx.modelRegistry.getAvailable());
+			const models = serializeModels(filterSupportedWorkflowModels(ctx.modelRegistry.getAvailable() as Model[]));
 			return { content: [{ type: "text", text: modelCatalogText(models) || "No authenticated models available" }], details: { models } };
 		},
 		renderCall(_args, theme) { return new Text(theme.fg("toolTitle", theme.bold("workflow models")), 0, 0); },
@@ -222,8 +470,13 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Recipes (diagnose, design, review, implement) are optional conveniences, not mandatory templates. Freely write a custom JavaScript workflow whenever it better matches the task, routing, or model strategy.",
 			"Use workflow_run only when fan-out, context isolation, loops, branching, or independent verification materially improves the task.",
-			"Call workflow_models before workflow_run when selecting worker models. Explicit user model choices are binding; otherwise choose models at your own discretion from the returned authenticated catalog.",
+			"Interpret the user's model preferences semantically in whatever language they used and encode the decision in modelPolicy. Never infer policy from fixed keywords. Explicit user constraints are binding runtime allowlists. Workflows support provider groups opencode-go, anthropic, openai, and modelhub; use allowedProviders for the source and allowedFamilies for the underlying model vendor, intersecting them when both matter.",
+			"Claude-compatible routing is the default: use modelPolicy.defaultRouting='inherit' and omit agent.model so workers inherit the current session model. Use agent.model for deliberate per-stage routing. Use 'auto' only when you intentionally delegate selection to Pi++'s capability/cost router.",
+			"Call workflow_models before choosing exact worker models or restricting a workflow to a family different from the session model. Under an allowlist, route exact eligible models or deliberately set defaultRouting='auto'; an ineligible inherited model fails closed.",
 			`Reusable profiles: ${PROFILE_NAMES.join(", ")}. Prefer profiles over ad-hoc role prose; their structured JSON contracts are validated and invalid output is retried.`,
+			"For ad-hoc structured workers, pass a JSON Schema as agent(..., { schema }). The runtime returns the parsed JSON value directly to JavaScript, validates nested values and additional properties, and retries invalid worker output. Without schema, agent() returns text.",
+			"Declare size as small (<5 agents), medium (<15), large (<50), or unrestricted, and set hard budgets when appropriate. budgets.maxAgents/maxTokens/maxCost stop new workers after exhaustion; already-running workers may finish and partial results remain available. Runs above 25 scheduled agents or 1.5M projected output tokens warn explicitly.",
+			"Use agent(..., { maxTurns }) to bound an individual worker. A worker that reaches the limit while requesting another tool is terminated by the parent event stream and is not retried.",
 			"Every custom workflow_run script must give each subagent a task-specific prompt through agent(prompt, options). Do not use one generic shared worker prompt.",
 			"Use phase(name) for visible stages, parallel([() => agent(...), ...]) for fan-out, pipeline(items, stage...) for maps, ordinary JavaScript loops/branches for loop-until-done and classify-and-act, and a final agent critic/synthesizer before return when correctness matters.",
 			"Workflow workers inherit the global Pi++ permission service. Never treat workflow approval as permission to bypass global tool policy; if the permission extension is unavailable, workers fail closed to read-only behavior.",
@@ -240,69 +493,16 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				if (!requested.script?.trim()) throw new Error("workflow_run requires either recipe or script");
 				spec = requested as WorkflowSpec;
 			}
-			spec.modelFamily ??= inferModelFamilyInstruction(spec.userModelInstruction, spec.prompt, spec.goal);
+			// Compatibility for callers saved before the structured policy existed.
+			spec.modelPolicy ??= {
+				defaultRouting: "inherit",
+				rationale: "No explicit model policy was supplied; use Claude-compatible session-model inheritance.",
+			};
 			const compileError = validateWorkflowScript(spec.script);
 			if (compileError) throw new Error(`Invalid workflow JavaScript: ${compileError}`);
 			const approved = await approve(spec, ctx);
 			if (!approved) return { content: [{ type: "text", text: "Workflow canceled" }], details: { canceled: true } };
-			spec = approved;
-			await ctx.modelRegistry.refresh();
-			const models = ctx.modelRegistry.getAvailable() as Model[];
-			const runId = `wf_${Date.now().toString(36)}_${(++counter).toString(36)}`;
-			const run: WorkflowRun = {
-				id: runId,
-				sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, spec, status: "queued", createdAt: Date.now(),
-				currentPhase: "Starting", phases: [], agents: [], flags: [], usage: zeroUsage(), paused: false, logs: [],
-				artifactPath: path.join(artifactDir, `${runId}.json`),
-			};
-			runs.set(run.id, run);
-			const runtime = createWorkflowController(run, models, ctx.model, {
-				changed: (event, agent) => {
-					changed(run, event, agent);
-					onUpdate?.({ content: [{ type: "text", text: `${icon(run.status)} ${run.spec.name} · ${run.currentPhase} · ${run.agents.length} agents` }], details: { runId: run.id, status: run.status } });
-				},
-				notify,
-				requestPermission: (request) => requestPermission(run, request),
-				requestApproval: async (title, detail) => {
-					if (!ctx.hasUI) return false;
-					const shown = detail.length > 12_000 ? `${detail.slice(0, 12_000)}\n…` : detail;
-					const choice = await ctx.ui.select(`${title}\n\n${shown}`, ["Approve and continue", "Reject and stop"]);
-					return choice === "Approve and continue";
-				},
-			});
-			controllers.set(run.id, runtime.controller);
-			changed(run, "created");
-			const initialArtifactTimer = artifactTimers.get(run.id);
-			if (initialArtifactTimer) clearTimeout(initialArtifactTimer);
-			artifactTimers.delete(run.id);
-			await writeArtifactNow(run);
-			const background = spec.background ?? true;
-			const promise = runtime.execute().then(async () => {
-				controllers.delete(run.id);
-				await writeArtifactNow(run);
-				await persistNow(run);
-				const level = run.status === "failed" ? "error" : run.status === "completed_with_flags" ? "warning" : "info";
-				notify(`Workflow ${run.status.replaceAll("_", " ")}: ${run.spec.name} · ${summary(run)}`, level);
-				if (background) {
-					const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting; it is the source of truth and remains available throughout execution:\n${run.artifactPath}` : "";
-					pi.sendMessage({
-						customType: "piplusplus-workflow-result",
-						content: `Workflow ${run.id} (${run.spec.name}) ${run.status}.\n\n${run.result ?? run.error ?? "No result"}\n\n${summary(run)}${run.flags.length ? `\nFlags:\n- ${run.flags.join("\n- ")}` : ""}${handoff}`,
-						display: true,
-						details: { runId: run.id, status: run.status, artifactPath: run.artifactPath },
-					}, { triggerTurn: true, deliverAs: "followUp" });
-				}
-			});
-			if (background) {
-				void promise;
-				return { content: [{ type: "text", text: `Started JavaScript workflow ${run.id}: ${run.spec.name}. Use /workflows for live UI or read the continuously updated workflow JSON at any time:\n${run.artifactPath}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath } };
-			}
-			const abort = () => runtime.controller.stop();
-			signal?.addEventListener("abort", abort, { once: true });
-			await promise;
-			signal?.removeEventListener("abort", abort);
-			const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting:\n${run.artifactPath}` : "";
-			return { content: [{ type: "text", text: `${run.result ?? run.error ?? "No result"}\n\n${run.status} · ${summary(run)}${handoff}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath, run } };
+			return launchApprovedWorkflow(approved, ctx, signal, onUpdate);
 		},
 		renderCall(args, theme) {
 			let text = `${theme.fg("toolTitle", theme.bold("workflow "))}${theme.fg("accent", args.name ?? "…")}`;
@@ -315,24 +515,63 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			if (details?.canceled) return new Text(theme.fg("warning", "Workflow canceled"), 0, 0);
 			const run = details?.runId ? runs.get(details.runId) : undefined;
 			if (!run) return new Text("Workflow", 0, 0);
-			let text = `${theme.fg(run.status === "failed" ? "error" : run.status === "completed_with_flags" ? "warning" : run.status === "completed" ? "success" : "accent", icon(run.status))} ${theme.bold(run.spec.name)} ${theme.fg("dim", `· ${run.id} · ${summary(run)}`)}`;
+			let text = `${theme.fg(run.status === "failed" ? "error" : run.status === "completed_with_flags" || run.status === "budget_exhausted" ? "warning" : run.status === "completed" ? "success" : "accent", icon(run.status))} ${theme.bold(run.spec.name)} ${theme.fg("dim", `· ${run.id} · ${summary(run)}`)}`;
 			if (expanded) for (const agent of run.agents) text += `\n  ${icon(agent.status)} ${agent.label} ${theme.fg("dim", `· ${agent.resolvedModel ?? agent.requestedModel ?? "auto"}`)}`;
 			return new Text(text, 0, 0);
 		},
 	});
 
 	pi.registerMessageRenderer("piplusplus-workflow-result", (message, _options, theme) => new Text(
-		theme.fg(message.content.includes(" failed") ? "error" : message.content.includes("completed_with_flags") ? "warning" : "success", message.content), 0, 0,
+		theme.fg(message.content.includes(" failed") ? "error" : message.content.includes("completed_with_flags") || message.content.includes("budget_exhausted") ? "warning" : "success", message.content), 0, 0,
 	));
 
 	pi.registerCommand("workflows", {
 		description: "Browse workflows, phases, subagent prompts, tools, models, errors, and results",
 		handler: async (args, ctx) => {
-			const [action, id] = args.trim().split(/\s+/, 2);
+			const [action, id, agentId] = args.trim().split(/\s+/, 3);
+			if (action === "triggers") {
+				if (id !== "on" && id !== "off" && id !== "status") {
+					ctx.ui.notify("Usage: /workflows triggers on|off|status", "warning");
+					return;
+				}
+				if (id !== "status") {
+					workflowSettings = { ...workflowSettings, triggersEnabled: id === "on" };
+					if (!workflowSettings.triggersEnabled) pendingUltracodeTriggers.length = 0;
+					try { await saveWorkflowSettings(getAgentDir(), workflowSettings); }
+					catch (error) { ctx.ui.notify(`Could not save workflow trigger setting: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
+				}
+				ctx.ui.notify(`Literal interactive workflow triggers are ${workflowSettings.triggersEnabled ? "enabled" : "disabled"}. Direct workflow_run, saved commands, and /workflows inspection remain available.`, "info");
+				return;
+			}
+			if (action === "ultracode-effort") {
+				if (id !== "one-prompt" && id !== "session" && id !== "status") {
+					ctx.ui.notify("Usage: /workflows ultracode-effort one-prompt|session|status", "warning");
+					return;
+				}
+				if (id !== "status") {
+					workflowSettings = { ...workflowSettings, ultracodeEffortMode: id };
+					try { await saveWorkflowSettings(getAgentDir(), workflowSettings); }
+					catch (error) { ctx.ui.notify(`Could not save ultracode effort setting: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
+				}
+				ctx.ui.notify(`Ultracode effort mode: ${workflowSettings.ultracodeEffortMode}.`, "info");
+				return;
+			}
 			if (action === "stop" && id) { controllers.get(id)?.stop(); return; }
+			if (action === "hard-stop" && id) { controllers.get(id)?.hardStop(); return; }
+			if (action === "resume" && id) { await resumeWorkflow(id); return; }
+			if (action === "restart" && id && agentId) {
+				const run = runs.get(id);
+				if (!run) { ctx.ui.notify(`Unknown workflow: ${id}`, "error"); return; }
+				if (["queued", "running", "paused"].includes(run.status)) controllers.get(id)?.restartAgent(agentId);
+				else await resumeWorkflow(id, agentId);
+				return;
+			}
 			if (action === "status" && id) {
 				const run = runs.get(id);
-				ctx.ui.notify(run ? `${icon(run.status)} ${run.spec.name} · ${run.status} · ${summary(run)}` : `Unknown workflow: ${id}`, run?.status === "failed" ? "error" : "info");
+				ctx.ui.notify(
+					run ? `${icon(run.status)} ${run.spec.name} · ${run.status} · ${summary(run)}` : `Unknown workflow: ${id}`,
+					run?.status === "failed" ? "error" : run?.status === "budget_exhausted" || run?.status === "completed_with_flags" ? "warning" : "info",
+				);
 				return;
 			}
 			await openWorkflowDock(ctx);
@@ -340,35 +579,30 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("input", (event) => {
-		if (event.source !== "extension" && /(?<![\p{L}\p{N}_])ultracode(?![\p{L}\p{N}_])/iu.test(event.text)) {
-			pendingUltracodeTriggers++;
-		}
+		// Slash commands are handled without an agent turn and must not leave a
+		// stale origin decision for the next prompt.
+		if (/^\s*\//.test(event.text)) return { action: "continue" as const };
+		pendingUltracodeTriggers.push(isInteractiveUltracodeTrigger(event.source, event.text, workflowSettings.triggersEnabled));
+		if (pendingUltracodeTriggers.length > 100) pendingUltracodeTriggers.splice(0, pendingUltracodeTriggers.length - 100);
 		return { action: "continue" as const };
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
-		await ctx.modelRegistry.refresh();
-		const catalog = modelCatalogText(serializeModels(ctx.modelRegistry.getAvailable()));
-		const ultracodeTriggered = pendingUltracodeTriggers > 0 && /(?<![\p{L}\p{N}_])ultracode(?![\p{L}\p{N}_])/iu.test(event.prompt);
-		if (ultracodeTriggered) pendingUltracodeTriggers--;
-		if (ultracodeTriggered && restoreThinking === undefined) {
+	pi.on("before_agent_start", (event, ctx) => {
+		const models = serializeModels(filterSupportedWorkflowModels(ctx.modelRegistry.getAvailable() as Model[]));
+		const ultracodeTriggered = pendingUltracodeTriggers.shift() === true
+			&& /(?<![\p{L}\p{N}_])ultracode(?![\p{L}\p{N}_])/iu.test(event.prompt);
+		if (ultracodeTriggered && workflowSettings.ultracodeEffortMode === "one-prompt" && restoreThinking === undefined) {
 			restoreThinking = pi.getThinkingLevel() as ThinkingLevel;
 			pi.setThinkingLevel("xhigh");
+		} else if (ultracodeTriggered && workflowSettings.ultracodeEffortMode === "session") {
+			restoreThinking = undefined;
+			pi.setThinkingLevel("xhigh");
 		}
-		const instructions = [
-			"# Dynamic JavaScript workflows",
-			"workflow_run runs either an optional named recipe or a fully custom JavaScript orchestration body outside the main context. Each agent(prompt, options) starts an isolated Pi subagent with a distinct assignment. You are free to write the entire script, choose every model independently, mix profiles with ad-hoc prompts, or omit profiles; recipes and profiles are never compulsory.",
-			ultracodeTriggered ? "The user's prompt contains the bounded trigger word `ultracode`. This is a one-prompt opt-in: use xhigh-level deliberation and generate a dynamic workflow for this task." : "Use workflows only when explicitly requested or materially useful; avoid them for small linear tasks.",
-			"Before model assignment, inspect workflow_models or this authenticated catalog and choose from models actually available. User choices win. If the user requests GPT, OpenAI, Claude, or Anthropic workers, set modelFamily; the runtime enforces that explicit constraint and never falls back across families. Without an explicit family constraint, choose any model per worker and set modelRationale; model:'auto' is only an optional neutral fallback, not a requirement.",
-			"Every workflow immediately creates a continuously updated JSON artifact whose path is returned by workflow_run. Use the read tool to inspect it at any time and always read it before reporting; read access is permitted by the global policy even though the artifact is outside the project. It is the source of truth for the script, live status, retries, prompts, outputs, tools, logs, usage, errors, verification, flags, and summary.",
-			"Workflow tool permissions are separate from script approval and inherit the global /permissions mode. Manual explains and confirms writes, edits, commands, and unknown custom tools; auto only permits operations proven low-risk; read-only blocks mutations. Confirmation-required operations fail closed without a UI.",
-			`Specialist profiles are ${PROFILE_NAMES.join(", ")}. Profiles add evidence-focused instructions and, except synthesizer, runtime-validated JSON status contracts; malformed output retries automatically. Use writePaths on mutating workers to enforce direct write/edit scope.`,
-			"Available custom-script primitives: phase(name); await agent(uniquePrompt, {id,label,profile,kind,model,modelRationale,thinking,tools,writePaths}); await approve(title, detail); parallel(...); pipeline(...); models(); workflowPrompt; cwd; platform; return. Use cwd/platform directly, never assume Node globals, filesystem APIs, require, fetch, or environment access. Maximum 16 concurrent and 1000 total agents.",
-			"Prompt workers with objective, scope, constraints, required evidence, expected deliverable, and explicit stop/escalation conditions. Do not prescribe commands they can discover from repository configuration. Keep factual investigation separate from planning, implementation, and independent verification. Never ask a synthesizer to invent evidence missing from upstream workers.",
-			"For custom correctness-sensitive work, use this shape: evidence collection → independent verification or counter-evidence → synthesis. For mutations: inspect/plan → approve(plan) → scoped implementation → independent code and security review → synthesis. Do not mark a workflow successful merely because tools ran or tests exited zero; require evidence tied to the requested behavior.",
-			"Authenticated models:",
-			catalog || "(none)",
-		].join("\n\n");
+		const instructions = buildWorkflowSystemInstructions({
+			models,
+			ultracodeTriggered,
+			ultracodeEffortMode: workflowSettings.ultracodeEffortMode,
+		});
 		return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
 	});
 
@@ -382,7 +616,12 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		ctxNow = ctx;
 		restoreThinking = undefined;
-		pendingUltracodeTriggers = 0;
+		pendingUltracodeTriggers.length = 0;
+		try { workflowSettings = await loadWorkflowSettings(getAgentDir()); }
+		catch (error) {
+			workflowSettings = { ...DEFAULT_WORKFLOW_SETTINGS };
+			notify(`Could not load workflow settings; defaults are active: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
 		try {
 			const cutoff = Date.now() - retentionDays * 86_400_000;
 			for (const directory of [stateDir, artifactDir]) {
@@ -395,15 +634,26 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			for (const file of await fs.promises.readdir(stateDir)) {
 				if (!file.endsWith(".json")) continue;
 				try {
-					const run = JSON.parse(await fs.promises.readFile(path.join(stateDir, file), "utf8")) as WorkflowRun;
+					const run = migrateWorkflowRun(JSON.parse(await fs.promises.readFile(path.join(stateDir, file), "utf8")));
 					if (run.sessionId !== ctx.sessionManager.getSessionId()) continue;
-					if (["queued", "running", "paused"].includes(run.status)) { run.status = "stopped"; run.finishedAt = Date.now(); run.error = "Interrupted by session restart or reload"; }
+					if (["queued", "running", "paused"].includes(run.status)) {
+						run.status = "stopped";
+						run.finishedAt = Date.now();
+						run.error = "Interrupted by session restart or reload; this same-session run can be resumed.";
+					}
 					run.logs ??= [];
-					for (const agent of run.agents) { agent.logs ??= []; agent.messages ??= []; agent.events ??= []; }
+					for (const agent of run.agents) {
+						if (agent.status === "queued" || agent.status === "running") agent.status = "stopped";
+						agent.logs ??= [];
+						agent.messages ??= [];
+						agent.events ??= [];
+						agent.scanFindings ??= [];
+					}
 					runs.set(run.id, run);
 				} catch { /* ignore malformed old state */ }
 			}
 		} catch { /* best effort */ }
+		await refreshSavedWorkflowCommands(ctx);
 		for (const run of runs.values()) scheduleArtifact(run, true);
 		refreshUi();
 	});
