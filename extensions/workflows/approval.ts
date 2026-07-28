@@ -19,6 +19,9 @@ export function inspectWorkflowPlan(spec: WorkflowSpec): WorkflowPlanPreview {
 	if (spec.budgets?.maxCost !== undefined) cautions.push(`Cost scheduling threshold: $${spec.budgets.maxCost.toFixed(4)}; already-running workers may report additional cost.`);
 	else cautions.push("No hard cost cap is configured.");
 	if (spec.budgets?.maxAgents !== undefined) cautions.push(`Hard agent cap: ${spec.budgets.maxAgents}.`);
+	if (spec.turnPolicy?.mode === "custom") cautions.push(`User-owned worker limit: ${spec.turnPolicy.maxTurns} turns per worker.`);
+	else if (spec.turnPolicy?.mode === "model") cautions.push("The orchestrator may set maxTurns independently for each worker.");
+	else cautions.push("Worker maxTurns is off; workers have unlimited turns until completion, stop, or deadline.");
 	return { phases, staticAgentSites, cautions };
 }
 

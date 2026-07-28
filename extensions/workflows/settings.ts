@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { WorkflowBudgets, WorkflowSpec } from "./types.ts";
 
 export type WorkflowBudgetMode = "off" | "custom" | "model";
+export type WorkflowMaxTurnsMode = "off" | "custom" | "model";
 
 export interface WorkflowSettings {
 	triggersEnabled: boolean;
@@ -14,12 +15,20 @@ export interface WorkflowSettings {
 	 */
 	budgetMode: WorkflowBudgetMode;
 	customBudgets?: WorkflowBudgets;
+	/**
+	 * off: every worker is unlimited and script-proposed maxTurns is ignored
+	 * custom: apply customMaxTurns to every worker
+	 * model: allow the orchestrator to choose maxTurns per worker
+	 */
+	maxTurnsMode: WorkflowMaxTurnsMode;
+	customMaxTurns?: number;
 }
 
 export const DEFAULT_WORKFLOW_SETTINGS: WorkflowSettings = {
 	triggersEnabled: true,
 	ultracodeEffortMode: "one-prompt",
 	budgetMode: "off",
+	maxTurnsMode: "off",
 };
 
 export function workflowSettingsPath(agentDir: string): string {
@@ -54,15 +63,30 @@ export function normalizeCustomBudgets(value: unknown): WorkflowBudgets | undefi
 	return Object.keys(budgets).length ? budgets : undefined;
 }
 
+export function normalizeCustomMaxTurns(value: unknown): number {
+	const parsed = typeof value === "string" && /^\d+$/.test(value.trim()) ? Number(value.trim()) : value;
+	if (!Number.isInteger(parsed) || Number(parsed) < 1 || Number(parsed) > 1_000) {
+		throw new Error("customMaxTurns must be an integer from 1 to 1000.");
+	}
+	return Number(parsed);
+}
+
 function normalizedSettings(value: unknown): WorkflowSettings {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return { ...DEFAULT_WORKFLOW_SETTINGS };
 	const record = value as Record<string, unknown>;
 	const budgetMode: WorkflowBudgetMode = record.budgetMode === "custom" || record.budgetMode === "model" || record.budgetMode === "off"
 		? record.budgetMode
 		: DEFAULT_WORKFLOW_SETTINGS.budgetMode;
+	let maxTurnsMode: WorkflowMaxTurnsMode = record.maxTurnsMode === "custom" || record.maxTurnsMode === "model" || record.maxTurnsMode === "off"
+		? record.maxTurnsMode
+		: DEFAULT_WORKFLOW_SETTINGS.maxTurnsMode;
 	let customBudgets: WorkflowBudgets | undefined;
 	try { customBudgets = normalizeCustomBudgets(record.customBudgets); }
 	catch { customBudgets = undefined; }
+	let customMaxTurns: number | undefined;
+	try { customMaxTurns = record.customMaxTurns === undefined ? undefined : normalizeCustomMaxTurns(record.customMaxTurns); }
+	catch { customMaxTurns = undefined; }
+	if (maxTurnsMode === "custom" && customMaxTurns === undefined) maxTurnsMode = "off";
 	return {
 		triggersEnabled: typeof record.triggersEnabled === "boolean" ? record.triggersEnabled : DEFAULT_WORKFLOW_SETTINGS.triggersEnabled,
 		ultracodeEffortMode: record.ultracodeEffortMode === "session" || record.ultracodeEffortMode === "one-prompt"
@@ -70,6 +94,8 @@ function normalizedSettings(value: unknown): WorkflowSettings {
 			: DEFAULT_WORKFLOW_SETTINGS.ultracodeEffortMode,
 		budgetMode,
 		...(customBudgets === undefined ? {} : { customBudgets }),
+		maxTurnsMode,
+		...(customMaxTurns === undefined ? {} : { customMaxTurns }),
 	};
 }
 
@@ -83,10 +109,28 @@ export function applyWorkflowBudgetSettings(spec: WorkflowSpec, settings: Workfl
 	};
 }
 
+export function applyWorkflowSettings(spec: WorkflowSpec, settings: WorkflowSettings): WorkflowSpec {
+	const budgeted = applyWorkflowBudgetSettings(spec, settings);
+	const mode = settings.maxTurnsMode ?? DEFAULT_WORKFLOW_SETTINGS.maxTurnsMode;
+	return {
+		...budgeted,
+		turnPolicy: mode === "custom"
+			? { mode: "custom", maxTurns: normalizeCustomMaxTurns(settings.customMaxTurns) }
+			: { mode },
+	};
+}
+
 export function describeWorkflowBudgetSettings(settings: WorkflowSettings): string {
 	if (settings.budgetMode === "off") return "off (no aggregate agent/token/cost budget; runtime safety ceilings and deadline still apply)";
 	if (settings.budgetMode === "model") return "model (the orchestrator may choose per-run limits)";
 	return `custom ${JSON.stringify(settings.customBudgets ?? {})}`;
+}
+
+export function describeWorkflowMaxTurnsSettings(settings: WorkflowSettings): string {
+	const mode = settings.maxTurnsMode ?? DEFAULT_WORKFLOW_SETTINGS.maxTurnsMode;
+	if (mode === "off") return "off (unlimited worker turns; script maxTurns is ignored)";
+	if (mode === "model") return "model (the orchestrator may set maxTurns per worker)";
+	return `custom ${normalizeCustomMaxTurns(settings.customMaxTurns)} turns per worker`;
 }
 
 function assertSafeSettingsPath(agentDir: string, target: string): void {
@@ -115,6 +159,7 @@ export async function saveWorkflowSettings(agentDir: string, settings: WorkflowS
 	if (settings.budgetMode === "custom" && !normalizeCustomBudgets(settings.customBudgets)) {
 		throw new Error("Custom workflow budget mode requires at least one configured limit.");
 	}
+	if (settings.maxTurnsMode === "custom") normalizeCustomMaxTurns(settings.customMaxTurns);
 	const normalized = normalizedSettings(settings);
 	const target = workflowSettingsPath(agentDir);
 	assertSafeSettingsPath(agentDir, target);

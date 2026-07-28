@@ -32,6 +32,7 @@ test("legacy workflow state migrates to structured policy and scanning/cache def
 	assert.deepEqual(run.spec.modelPolicy.allowedFamilies, ["openai"]);
 	assert.equal(run.spec.modelPolicy.defaultRouting, "inherit");
 	assert.match(run.spec.modelPolicy.rationale, /not parsed/);
+	assert.deepEqual(run.spec.turnPolicy, { mode: "off" });
 	assert.equal(run.agents[0].rawOutput, "safe");
 	assert.deepEqual(run.agents[0].scanFindings, []);
 	assert.equal(run.agents[0].cached, false);

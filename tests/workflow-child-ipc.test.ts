@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import test from "node:test";
 import {
+	buildChildAgentArgs,
 	createPermissionResponseWriter,
+	formatChildInvocationForLog,
 	isClosedPermissionPipeError,
 } from "../extensions/workflows/child.ts";
+import { zeroUsage, type AgentState } from "../extensions/workflows/types.ts";
 
 function failingPipe(code: string): Writable {
 	return new Writable({
@@ -38,4 +41,26 @@ test("permission response IPC reports unexpected stream failures without throwin
 
 	assert.equal(unexpected.length, 1);
 	assert.equal((unexpected[0] as NodeJS.ErrnoException).code, "EACCES");
+});
+
+test("structured contracts and profile instructions stay out of the visible worker prompt", () => {
+	const agent: AgentState = {
+		id: "review", label: "Review", phase: "Verification", prompt: "Review the actual diff.", kind: "review",
+		profile: "reviewer", schema: { type: "object", properties: { status: { type: "string" } } },
+		thinking: "max", effectiveThinking: "high", providerThinking: "high",
+		status: "queued", createdAt: 1, scanFindings: [], flags: [], usage: zeroUsage(), toolCalls: [], messages: [], events: [], logs: [], attempt: 0,
+	};
+	const args = buildChildAgentArgs(agent, { provider: "modelhub", id: "gpt-test" });
+	const systemIndex = args.indexOf("--append-system-prompt");
+
+	assert.ok(systemIndex >= 0);
+	assert.match(args[systemIndex + 1], /Workflow specialist profile: reviewer/);
+	assert.match(args[systemIndex + 1], /Workflow structured output contract/);
+	assert.match(args[systemIndex + 1], /"status"/);
+	assert.equal(args.at(-1), "Review the actual diff.");
+	assert.deepEqual(args.slice(args.indexOf("--thinking"), args.indexOf("--thinking") + 2), ["--thinking", "high"]);
+
+	const logged = formatChildInvocationForLog("pi", args);
+	assert.match(logged, /\[structured-output-contract\]/);
+	assert.doesNotMatch(logged, /"status"|Review the actual diff/);
 });

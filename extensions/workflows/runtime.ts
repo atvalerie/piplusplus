@@ -2,10 +2,10 @@ import vm from "node:vm";
 import type { Model } from "@earendil-works/pi-ai";
 import { stableWorkflowHash } from "./cache.ts";
 import { runChildAgent } from "./child.ts";
-import { filterSupportedWorkflowModels, modelAllowedByPolicy, reportedModelMatches, resolveModel, serializeModels } from "./models.ts";
+import { filterSupportedWorkflowModels, modelAllowedByPolicy, reportedModelMatches, resolveModel, resolveWorkflowThinking, serializeModels } from "./models.ts";
 import { scanWorkflowText, scanWorkflowValue } from "./output-scan.ts";
 import { terminateProcessTree } from "./processes.ts";
-import { applyWorkflowProfile, normalizeJSONSchema, validateStructuredOutput, withStructuredOutputInstruction } from "./profiles.ts";
+import { applyWorkflowProfile, normalizeJSONSchema, validateStructuredOutput } from "./profiles.ts";
 import { executeSandboxedWorkflow } from "./sandbox.ts";
 import {
 	aggregateUsage,
@@ -101,7 +101,7 @@ export function createWorkflowController(
 	models: Model[],
 	mainModel: Model | undefined,
 	callbacks: RuntimeCallbacks,
-	dependencies: { runChildAgent?: typeof runChildAgent } = {},
+	dependencies: { runChildAgent?: typeof runChildAgent; sessionThinking?: import("./types.ts").ThinkingLevel } = {},
 ): { controller: WorkflowController; execute: () => Promise<void> } {
 	const modelPolicy = run.spec.modelPolicy;
 	if (run.spec.budgets?.maxAgents !== undefined && (!Number.isInteger(run.spec.budgets.maxAgents) || run.spec.budgets.maxAgents < 1 || run.spec.budgets.maxAgents > MAX_AGENTS)) {
@@ -112,6 +112,11 @@ export function createWorkflowController(
 	}
 	if (run.spec.budgets?.maxCost !== undefined && (!Number.isFinite(run.spec.budgets.maxCost) || run.spec.budgets.maxCost <= 0)) {
 		throw new Error("budgets.maxCost must be a positive finite number");
+	}
+	const turnPolicy = run.spec.turnPolicy ?? { mode: "off" as const };
+	if (!["off", "custom", "model"].includes(turnPolicy.mode)) throw new Error("turnPolicy.mode must be off, custom, or model");
+	if (turnPolicy.mode === "custom" && (!Number.isInteger(turnPolicy.maxTurns) || Number(turnPolicy.maxTurns) < 1 || Number(turnPolicy.maxTurns) > 1_000)) {
+		throw new Error("turnPolicy.maxTurns must be an integer from 1 to 1000 in custom mode");
 	}
 	const supportedModels = filterSupportedWorkflowModels(models);
 	const eligibleModels = supportedModels.filter((model) => modelAllowedByPolicy(model, modelPolicy));
@@ -268,17 +273,22 @@ export function createWorkflowController(
 			if (typeof options.phase !== "string" || !options.phase.trim()) throw new Error("agent phase must be a non-empty string");
 			requestedPhase = options.phase.trim();
 		}
-		const thinking = options.thinking ?? options.effort;
-		if (thinking !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking)) {
+		const requestedThinking = options.thinking ?? options.effort;
+		if (requestedThinking !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(requestedThinking)) {
 			throw new Error("agent thinking/effort must be off, minimal, low, medium, high, xhigh, or max");
 		}
 		const id = options.id ?? `agent_${++sequence}`;
 		if (run.agents.some((agent) => agent.id === id)) throw new Error(`Duplicate agent id: ${id}`);
-		const maxTurns = options.maxTurns === undefined
+		const proposedMaxTurns = options.maxTurns;
+		const maxTurns = turnPolicy.mode === "off"
 			? undefined
-			: Number.isInteger(options.maxTurns) && options.maxTurns >= 1 && options.maxTurns <= 1_000
-				? options.maxTurns
-				: (() => { throw new Error("maxTurns must be an integer from 1 to 1000"); })();
+			: turnPolicy.mode === "custom"
+				? turnPolicy.maxTurns
+				: proposedMaxTurns === undefined
+					? undefined
+					: Number.isInteger(proposedMaxTurns) && proposedMaxTurns >= 1 && proposedMaxTurns <= 1_000
+						? proposedMaxTurns
+						: (() => { throw new Error("maxTurns must be an integer from 1 to 1000"); })();
 		if (!scheduledAgentIds.has(id)) {
 			if (scheduledAgentIds.size >= configuredMaxAgents) {
 				markBudgetExhausted(`Agent budget exhausted (${scheduledAgentIds.size}/${configuredMaxAgents})`);
@@ -291,7 +301,7 @@ export function createWorkflowController(
 		const applied = applyWorkflowProfile(prompt, options.profile);
 		const profile = applied.profile;
 		const schema = normalizeJSONSchema(options.schema) ?? profile?.schema;
-		const workerPrompt = withStructuredOutputInstruction(applied.prompt, schema);
+		const workerPrompt = applied.prompt;
 		const kind: StepKind = options.kind ?? profile?.kind ?? "general";
 		const tools = normalizeWorkflowTools(options.tools ?? profile?.tools);
 		const writePaths = options.writePaths === undefined ? undefined : Array.isArray(options.writePaths) && options.writePaths.every((item) => typeof item === "string") ? [...new Set(options.writePaths)] : (() => { throw new Error("writePaths must be an array of paths"); })();
@@ -303,6 +313,8 @@ export function createWorkflowController(
 			? resolveModel(supportedModels, requestedModel, kind, mainModel, modelPolicy.defaultRouting)
 			: undefined;
 		const model = resolveModel(eligibleModels, requestedModel, kind, eligibleMainModel, modelPolicy.defaultRouting);
+		const inheritedThinking = requestedThinking ?? dependencies.sessionThinking ?? "medium";
+		const resolvedThinking = model ? resolveWorkflowThinking(model, inheritedThinking) : undefined;
 		const dependencySnapshot = [...completedResults.entries()]
 			.map(([dependencyId, value]) => ({ id: dependencyId, ...value }))
 			.sort((left, right) => left.id.localeCompare(right.id));
@@ -316,9 +328,12 @@ export function createWorkflowController(
 			requestedModel,
 			resolvedModel: model ? `${model.provider}/${model.id}` : undefined,
 			modelRationale: options.modelRationale,
-			thinking,
+			requestedThinking,
+			effectiveThinking: resolvedThinking?.effective,
+			providerThinking: resolvedThinking?.provider,
 			tools,
 			profile: profile?.name,
+			profileInstruction: profile?.instruction,
 			writePaths,
 			maxTurns,
 			schema,
@@ -344,7 +359,9 @@ export function createWorkflowController(
 				requestedModel,
 				resolvedModel: model ? `${model.provider}/${model.id}` : prior.resolvedModel,
 				modelRationale: options.modelRationale,
-				thinking,
+				thinking: requestedThinking,
+				effectiveThinking: resolvedThinking?.effective,
+				providerThinking: resolvedThinking?.provider,
 				tools,
 				profile: profile?.name,
 				writePaths,
@@ -374,7 +391,9 @@ export function createWorkflowController(
 			kind,
 			requestedModel: options.model,
 			modelRationale: options.modelRationale,
-			thinking,
+			thinking: requestedThinking,
+			effectiveThinking: resolvedThinking?.effective,
+			providerThinking: resolvedThinking?.provider,
 			tools,
 			profile: profile?.name,
 			writePaths,

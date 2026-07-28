@@ -49,6 +49,25 @@ test("workflow browser uses a bounded, selection-following viewport", () => {
 	assert.equal(closed, true);
 });
 
+test("workflow browser shows effective and provider-specific worker effort", () => {
+	const item = run([agent({
+		thinking: "max",
+		effectiveThinking: "max",
+		providerThinking: "xhigh",
+		resolvedModel: "modelhub/gpt-test",
+	})]);
+	const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as Theme;
+	const browser = new WorkflowBrowser(() => [item], new Map(), theme, () => {}, 30);
+
+	browser.handleInput("\x1b[C");
+	browser.handleInput("\x1b[C");
+	assert.match(browser.render(120).join("\n"), /effort max→xhigh/);
+	browser.handleInput("\x1b[C");
+	const detail = browser.render(120).join("\n");
+	assert.match(detail, /Requested effort: max/);
+	assert.match(detail, /Effective effort: max · provider value: xhigh/);
+});
+
 test("unverified workflows produce one consolidated parent-agent handoff", async () => {
 	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-artifact-"));
 	const workflow = run([agent()]);
@@ -63,6 +82,7 @@ test("unverified workflows produce one consolidated parent-agent handoff", async
 	assert.equal(artifact.execution.agentCount, 1);
 	assert.equal(artifact.summary, "Final summary");
 	assert.equal(artifact.agents[0].prompt, "Inspect architecture");
+	assert.equal(artifact.agents[0].requestedThinking, undefined);
 	assert.equal(artifact.agents[0].output, "Architecture output");
 	assert.equal(artifact.agents[0].rawOutput, "Architecture output");
 	assert.deepEqual(artifact.agents[0].scanFindings, []);

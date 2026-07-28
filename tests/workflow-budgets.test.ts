@@ -135,6 +135,7 @@ test("token and cost budgets stop later workers without retrying deterministic e
 
 test("maxTurns exhaustion is deterministic and is never retried", async () => {
 	const run = workflow(`return await agent("loop", { id: "loop", maxTurns: 2 });`);
+	run.spec.turnPolicy = { mode: "model" };
 	let calls = 0;
 	await createWorkflowController(run, [model], model, callbacks(), {
 		runChildAgent: (async (_cwd: string, agent: any) => {
@@ -149,6 +150,31 @@ test("maxTurns exhaustion is deterministic and is never retried", async () => {
 	assert.equal(run.agents[0].status, "budget_exhausted");
 	assert.equal(run.agents[0].maxTurns, 2);
 	assert.equal(run.agents[0].attempt, 1);
+});
+
+test("maxTurns is unlimited by default and a custom user limit overrides the script", async () => {
+	const unlimited = workflow(`return await agent("unlimited", { id: "unlimited", maxTurns: 2 });`);
+	let unlimitedLimit: number | undefined;
+	await createWorkflowController(unlimited, [model], model, callbacks(), {
+		runChildAgent: (async (_cwd: string, agent: any) => {
+			unlimitedLimit = agent.maxTurns;
+			return result("done");
+		}) as any,
+	}).execute();
+	assert.equal(unlimitedLimit, undefined);
+	assert.equal(unlimited.agents[0].maxTurns, undefined);
+
+	const custom = workflow(`return await agent("custom", { id: "custom", maxTurns: 2 });`);
+	custom.spec.turnPolicy = { mode: "custom", maxTurns: 19 };
+	let customLimit: number | undefined;
+	await createWorkflowController(custom, [model], model, callbacks(), {
+		runChildAgent: (async (_cwd: string, agent: any) => {
+			customLimit = agent.maxTurns;
+			return result("done");
+		}) as any,
+	}).execute();
+	assert.equal(customLimit, 19);
+	assert.equal(custom.agents[0].maxTurns, 19);
 });
 
 test("cached results are reused without consuming a second token budget", async () => {
@@ -181,17 +207,36 @@ test("Claude-style effort and per-agent phase options map to worker state", asyn
 		phase("Probe");
 		return await agent("verify", { id: "verify", effort: "high", phase: "Adversarial" });
 	`);
-	let observed: { thinking?: string; phase?: string } = {};
+	let observed: { thinking?: string; effectiveThinking?: string; providerThinking?: string; phase?: string } = {};
 	await createWorkflowController(run, [model], model, callbacks(), {
 		runChildAgent: (async (_cwd: string, agent: any) => {
-			observed = { thinking: agent.thinking, phase: agent.phase };
+			observed = {
+				thinking: agent.thinking,
+				effectiveThinking: agent.effectiveThinking,
+				providerThinking: agent.providerThinking,
+				phase: agent.phase,
+			};
 			return result("verified");
 		}) as any,
 	}).execute();
 
-	assert.deepEqual(observed, { thinking: "high", phase: "Adversarial" });
+	assert.deepEqual(observed, { thinking: "high", effectiveThinking: "high", providerThinking: "high", phase: "Adversarial" });
 	assert.equal(run.agents[0].thinking, "high");
+	assert.equal(run.agents[0].effectiveThinking, "high");
 	assert.equal(run.agents[0].phase, "Adversarial");
 	assert.deepEqual(run.phases, ["Probe", "Adversarial"]);
 	assert.equal(run.status, "completed");
+});
+
+test("omitted worker effort inherits the session and records model/provider clamping", async () => {
+	const mappedModel = { ...model, thinkingLevelMap: { max: "xhigh" } };
+	const run = workflow(`return await agent("inherit effort", { id: "inherit-effort" });`);
+	await createWorkflowController(run, [mappedModel], mappedModel, callbacks(), {
+		sessionThinking: "max",
+		runChildAgent: (async () => result("done")) as any,
+	}).execute();
+
+	assert.equal(run.agents[0].thinking, undefined);
+	assert.equal(run.agents[0].effectiveThinking, "max");
+	assert.equal(run.agents[0].providerThinking, "xhigh");
 });

@@ -23,6 +23,7 @@ export function migrateWorkflowRun(value: unknown): WorkflowRun {
 				: "Migrated legacy workflow with Claude-compatible session-model inheritance.",
 		};
 	}
+	run.spec.turnPolicy ??= { mode: "off" };
 	run.currentPhase ||= "Workflow";
 	run.phases ??= [];
 	run.agents ??= [];

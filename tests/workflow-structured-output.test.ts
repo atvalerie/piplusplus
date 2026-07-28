@@ -71,14 +71,16 @@ test("invalid structured output retries and a valid retry reaches dependent Quic
 		logs: [],
 	};
 	let attempts = 0;
+	let visiblePrompt = "";
 	const { execute } = createWorkflowController(run, [model], model, {
 		changed: () => {},
 		notify: () => {},
 		requestPermission: async () => false,
 		requestApproval: async () => true,
 	}, {
-		runChildAgent: async () => {
+		runChildAgent: async (_cwd, agent) => {
 			attempts++;
+			visiblePrompt = agent.prompt;
 			return {
 				exitCode: 0,
 				output: attempts === 1 ? '{"user":{"roles":[]}}' : '{"user":{"name":"Ada","roles":["writer"]}}',
@@ -93,6 +95,8 @@ test("invalid structured output retries and a valid retry reaches dependent Quic
 	assert.equal(attempts, 2);
 	assert.equal(run.status, "completed");
 	assert.equal(run.fullResult, "Ada");
+	assert.equal(visiblePrompt, "Return a user");
+	assert.doesNotMatch(run.agents[0].prompt, /Structured output|JSON Schema/);
 	assert.deepEqual(run.agents[0].structuredOutput, { user: { name: "Ada", roles: ["writer"] } });
 	assert.equal(run.agents[0].attempt, 2);
 	assert.ok(run.agents[0].logs.some((entry) => entry.type === "retry_scheduled" && entry.message?.includes("$.user")));

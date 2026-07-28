@@ -94,13 +94,19 @@ export interface AgentState {
 	id: string;
 	label: string;
 	phase: string;
+	/** User-visible assignment only; profile/schema control instructions stay in the child system prompt. */
 	prompt: string;
 	kind: StepKind;
 	requestedModel?: string;
 	modelRationale?: string;
 	resolvedModel?: string;
 	reportedModel?: string;
+	/** Explicit worker request; omitted means inherit the current session effort. */
 	thinking?: ThinkingLevel;
+	/** Pi-level effort after session inheritance and model capability clamping. */
+	effectiveThinking?: ThinkingLevel;
+	/** Provider/model-specific effort value after thinkingLevelMap translation. */
+	providerThinking?: string;
 	tools?: string[];
 	profile?: string;
 	writePaths?: string[];
@@ -155,6 +161,12 @@ export interface WorkflowBudgets {
 	maxCost?: number;
 }
 
+export interface WorkflowTurnPolicy {
+	/** off: unlimited; custom: one user-owned limit for every worker; model: accept per-agent maxTurns. */
+	mode: "off" | "custom" | "model";
+	maxTurns?: number;
+}
+
 export interface WorkflowSpec {
 	name: string;
 	why: string;
@@ -167,6 +179,8 @@ export interface WorkflowSpec {
 	modelPolicy: WorkflowModelPolicy;
 	size?: WorkflowSize;
 	budgets?: WorkflowBudgets;
+	/** User-owned worker turn policy, applied after the orchestrator emits the script. */
+	turnPolicy?: WorkflowTurnPolicy;
 	concurrency?: number;
 	background?: boolean;
 	timeoutMs?: number;

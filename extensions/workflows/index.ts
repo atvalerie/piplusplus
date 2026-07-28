@@ -17,14 +17,17 @@ import { compileWorkflowRecipe, WORKFLOW_RECIPE_NAMES } from "./recipes.ts";
 import { createWorkflowController, validateWorkflowScript } from "./runtime.ts";
 import { createSavedWorkflowSource, loadSavedWorkflows, normalizeWorkflowArgs, parseSavedWorkflowArgs, savedWorkflowDirectories, saveWorkflowSource, type SavedWorkflow } from "./saved.ts";
 import {
-	applyWorkflowBudgetSettings,
+	applyWorkflowSettings,
 	DEFAULT_WORKFLOW_SETTINGS,
 	describeWorkflowBudgetSettings,
+	describeWorkflowMaxTurnsSettings,
 	isInteractiveUltracodeTrigger,
 	loadWorkflowSettings,
 	normalizeCustomBudgets,
+	normalizeCustomMaxTurns,
 	saveWorkflowSettings,
 	type WorkflowBudgetMode,
+	type WorkflowMaxTurnsMode,
 	type WorkflowSettings,
 } from "./settings.ts";
 import { buildWorkflowSystemInstructions, workflowPolicyContext } from "./system-prompt.ts";
@@ -288,7 +291,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				const choice = await ctx.ui.select(`${title}\n\n${shown}`, ["Approve and continue", "Reject and stop"]);
 				return choice === "Approve and continue";
 			},
-		});
+		}, { sessionThinking: pi.getThinkingLevel() as ThinkingLevel });
 		controllers.set(run.id, runtime.controller);
 		changed(run, "resume_requested");
 		void runtime.execute().then(async () => {
@@ -373,7 +376,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				const choice = await ctx.ui.select(`${title}\n\n${shown}`, ["Approve and continue", "Reject and stop"]);
 				return choice === "Approve and continue";
 			},
-		});
+		}, { sessionThinking: pi.getThinkingLevel() as ThinkingLevel });
 		controllers.set(run.id, runtime.controller);
 		changed(run, "created");
 		const initialArtifactTimer = artifactTimers.get(run.id);
@@ -441,7 +444,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 						background: true,
 						modelPolicy: { defaultRouting: "inherit", rationale: "Saved workflows use Claude-compatible session-model inheritance unless their script routes an agent explicitly." },
 					};
-					const approved = await approve(applyWorkflowBudgetSettings(spec, workflowSettings), commandContext);
+					const approved = await approve(applyWorkflowSettings(spec, workflowSettings), commandContext);
 					if (!approved) { commandContext.ui.notify(`Saved workflow /${name} canceled.`, "info"); return; }
 					const result = await launchApprovedWorkflow(approved, commandContext);
 					commandContext.ui.notify(result.content[0]?.text ?? `Started /${name}.`, "info");
@@ -485,8 +488,8 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			"Call workflow_models before choosing exact worker models or restricting a workflow to a family different from the session model. Under an allowlist, route exact eligible models or deliberately set defaultRouting='auto'; an ineligible inherited model fails closed.",
 			`Reusable profiles: ${PROFILE_NAMES.join(", ")}. Prefer profiles over ad-hoc role prose; their structured JSON contracts are validated and invalid output is retried.`,
 			"For ad-hoc structured workers, pass a JSON Schema as agent(..., { schema }). The runtime returns the parsed JSON value directly to JavaScript, validates nested values and additional properties, and retries invalid worker output. Without schema, agent() returns text.",
-			"Declare size as small (<5 agents), medium (<15), large (<50), or unrestricted. User-owned budget settings override budgets emitted here. Aggregate maxAgents/maxTokens/maxCost values stop new workers after exhaustion; already-running workers may finish and overrun token/cost thresholds. Use lower concurrency and per-agent maxTurns when a tighter bound is required. Runs above 25 scheduled agents or 1.5M projected output tokens warn explicitly.",
-			"Use agent(..., { maxTurns }) to bound an individual worker. A worker that reaches the limit while requesting another tool is terminated by the parent event stream and is not retried. Agent options accept thinking or the Claude Workflow-compatible effort alias, plus an optional per-agent phase override.",
+			"Declare size as small (<5 agents), medium (<15), large (<50), or unrestricted. User-owned budget settings override budgets emitted here. Aggregate maxAgents/maxTokens/maxCost values stop new workers after exhaustion; already-running workers may finish and overrun token/cost thresholds. Use lower concurrency when a tighter aggregate bound is required. Runs above 25 scheduled agents or 1.5M projected output tokens warn explicitly.",
+			"Worker maxTurns is controlled by the user's persistent off/custom/model policy: off is the unlimited default and ignores script values, custom applies one user limit to every worker, and only model mode accepts agent(..., { maxTurns }). A limited worker that requests another tool after reaching its limit is terminated once and is not retried. Agent options accept thinking or the Claude Workflow-compatible effort alias; omitted effort inherits the live session level and is clamped to the resolved model. Agent options also accept a per-agent phase override.",
 			"Every custom workflow_run script must give each subagent a task-specific prompt through agent(prompt, options). Do not use one generic shared worker prompt.",
 			"Use phase(name) for visible stages, parallel([() => agent(...), ...]) for fan-out, pipeline(items, stage...) for maps, ordinary JavaScript loops/branches for loop-until-done and classify-and-act, and a final agent critic/synthesizer before return when correctness matters.",
 			"Workflow workers inherit the global Pi++ permission service. Never treat workflow approval as permission to bypass global tool policy; if the permission extension is unavailable, workers fail closed to read-only behavior.",
@@ -508,7 +511,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				defaultRouting: "inherit",
 				rationale: "No explicit model policy was supplied; use Claude-compatible session-model inheritance.",
 			};
-			spec = applyWorkflowBudgetSettings(spec, workflowSettings);
+			spec = applyWorkflowSettings(spec, workflowSettings);
 			const compileError = validateWorkflowScript(spec.script);
 			if (compileError) throw new Error(`Invalid workflow JavaScript: ${compileError}`);
 			const approved = await approve(spec, ctx);
@@ -624,6 +627,48 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(`Workflow aggregate budgets: ${describeWorkflowBudgetSettings(workflowSettings)}. Already-running parallel workers can overrun token/cost scheduling thresholds.`, "info");
 				return;
 			}
+			if (action === "max-turns" || action === "maxturns") {
+				let mode = id as WorkflowMaxTurnsMode | "status" | "unlimited" | undefined;
+				if (!mode) {
+					const selected = await ctx.ui.select(`Workflow worker maxTurns: ${describeWorkflowMaxTurnsSettings(workflowSettings)}`, [
+						"Off - unlimited worker turns (default)",
+						"Custom - same user-owned limit for every worker",
+						"Model - orchestrator chooses per worker",
+						"Cancel",
+					]);
+					if (!selected || selected === "Cancel") return;
+					mode = selected.startsWith("Off") ? "off" : selected.startsWith("Custom") ? "custom" : "model";
+				}
+				if (mode === "status") {
+					ctx.ui.notify(`Workflow worker maxTurns: ${describeWorkflowMaxTurnsSettings(workflowSettings)}.`, "info");
+					return;
+				}
+				if (mode === "unlimited") mode = "off";
+				if (mode !== "off" && mode !== "model" && mode !== "custom") {
+					ctx.ui.notify("Usage: /workflows max-turns off|model|custom <1-1000>|status", "warning");
+					return;
+				}
+				let customMaxTurns = workflowSettings.customMaxTurns;
+				if (mode === "custom") {
+					const raw = parts.slice(2).join(" ").trim();
+					const entered = raw || await ctx.ui.input("Maximum turns per workflow worker", "1-1000");
+					if (entered === undefined) return;
+					try { customMaxTurns = normalizeCustomMaxTurns(entered); }
+					catch (error) {
+						ctx.ui.notify(`Invalid workflow maxTurns: ${error instanceof Error ? error.message : String(error)}`, "error");
+						return;
+					}
+				}
+				workflowSettings = {
+					...workflowSettings,
+					maxTurnsMode: mode,
+					...(mode === "custom" ? { customMaxTurns } : {}),
+				};
+				try { await saveWorkflowSettings(getAgentDir(), workflowSettings); }
+				catch (error) { ctx.ui.notify(`Could not save workflow maxTurns setting: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
+				ctx.ui.notify(`Workflow worker maxTurns: ${describeWorkflowMaxTurnsSettings(workflowSettings)}.`, "info");
+				return;
+			}
 			if (action === "stop" && id) { controllers.get(id)?.stop(); return; }
 			if (action === "hard-stop" && id) { controllers.get(id)?.hardStop(); return; }
 			if (action === "resume" && id) { await resumeWorkflow(id); return; }
@@ -671,6 +716,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			ultracodeTriggered,
 			ultracodeEffortMode: workflowSettings.ultracodeEffortMode,
 			budgetPolicy: describeWorkflowBudgetSettings(workflowSettings),
+			maxTurnsPolicy: describeWorkflowMaxTurnsSettings(workflowSettings),
 		});
 		return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
 	});

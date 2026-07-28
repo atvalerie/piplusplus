@@ -27,7 +27,7 @@ export async function writeWorkflowArtifact(run: WorkflowRun, directory: string)
 		reason: "Continuously updated workflow source of truth for live inspection and final handoff.",
 		workflow: {
 			id: run.id, name: run.spec.name, recipe: run.spec.recipe, modelPolicy: run.spec.modelPolicy, why: run.spec.why, goal: run.spec.goal, prompt: run.spec.prompt, args: run.spec.args,
-			script: run.spec.script, scriptHash: run.scriptHash, size: run.spec.size, budgets: run.spec.budgets, concurrency: run.spec.concurrency ?? 4,
+			script: run.spec.script, scriptHash: run.scriptHash, size: run.spec.size, budgets: run.spec.budgets, turnPolicy: run.spec.turnPolicy, concurrency: run.spec.concurrency ?? 4,
 			timeoutMs: run.spec.timeoutMs ?? 30 * 60_000, maxRetries: run.spec.maxRetries ?? 3, retryBaseMs: run.spec.retryBaseMs ?? 1_000,
 			cwd: run.cwd, sessionId: run.sessionId,
 		},
@@ -42,7 +42,8 @@ export async function writeWorkflowArtifact(run: WorkflowRun, directory: string)
 		agents: run.agents.map((agent) => ({
 			id: agent.id, label: agent.label, phase: agent.phase, kind: agent.kind, prompt: agent.prompt,
 			requestedModel: agent.requestedModel, resolvedModel: agent.resolvedModel, reportedModel: agent.reportedModel, modelRationale: agent.modelRationale,
-			thinking: agent.thinking, tools: agent.tools, profile: agent.profile, writePaths: agent.writePaths, maxTurns: agent.maxTurns, schema: agent.schema, status: agent.status, attempt: agent.attempt, nextRetryAt: agent.nextRetryAt,
+			requestedThinking: agent.thinking, effectiveThinking: agent.effectiveThinking, providerThinking: agent.providerThinking,
+			tools: agent.tools, profile: agent.profile, writePaths: agent.writePaths, maxTurns: agent.maxTurns, schema: agent.schema, status: agent.status, attempt: agent.attempt, nextRetryAt: agent.nextRetryAt,
 			createdAt: agent.createdAt, startedAt: agent.startedAt, finishedAt: agent.finishedAt, usage: agent.usage,
 			flags: agent.flags, toolCalls: agent.toolCalls,
 			cache: { cached: agent.cached ?? false, invocationHash: agent.invocationHash, resultHash: agent.resultHash, generation: agent.cacheGeneration ?? 0, dependencies: agent.dependencies ?? [] },

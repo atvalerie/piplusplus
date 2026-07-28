@@ -1,9 +1,44 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { modelHubFamilyFor } from "../shared/modelhub.ts";
-import type { DefaultModelRouting, ModelChoice, ModelFamily, StepKind, WorkflowModelPolicy, WorkflowProvider } from "./types.ts";
+import type { DefaultModelRouting, ModelChoice, ModelFamily, StepKind, ThinkingLevel, WorkflowModelPolicy, WorkflowProvider } from "./types.ts";
 
 export const SUPPORTED_WORKFLOW_PROVIDERS = ["opencode-go", "anthropic", "openai", "modelhub"] as const satisfies readonly WorkflowProvider[];
 const SUPPORTED_PROVIDER_SET = new Set<string>(SUPPORTED_WORKFLOW_PROVIDERS);
+const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+function supportedThinkingLevels(model: Pick<Model, "reasoning" | "thinkingLevelMap">): ThinkingLevel[] {
+	if (!model.reasoning) return ["off"];
+	return THINKING_LEVELS.filter((level) => {
+		const mapped = model.thinkingLevelMap?.[level];
+		if (mapped === null) return false;
+		if (level === "xhigh" || level === "max") return mapped !== undefined;
+		return true;
+	});
+}
+
+/** Mirrors Pi's public thinking-level clamp without introducing a runtime dependency on Pi internals. */
+export function resolveWorkflowThinking(
+	model: Pick<Model, "reasoning" | "thinkingLevelMap">,
+	requested: ThinkingLevel,
+): { effective: ThinkingLevel; provider: string } {
+	const supported = supportedThinkingLevels(model);
+	let effective = supported.includes(requested) ? requested : undefined;
+	const requestedIndex = THINKING_LEVELS.indexOf(requested);
+	if (!effective) {
+		for (let index = requestedIndex; index < THINKING_LEVELS.length; index++) {
+			const candidate = THINKING_LEVELS[index];
+			if (supported.includes(candidate)) { effective = candidate; break; }
+		}
+	}
+	if (!effective) {
+		for (let index = requestedIndex - 1; index >= 0; index--) {
+			const candidate = THINKING_LEVELS[index];
+			if (supported.includes(candidate)) { effective = candidate; break; }
+		}
+	}
+	effective ??= supported[0] ?? "off";
+	return { effective, provider: model.thinkingLevelMap?.[effective] ?? effective };
+}
 
 /** Normalize exact Pi provider IDs into the four provider groups supported by workflows. */
 export function workflowProvider(model: Pick<Model, "provider">): WorkflowProvider | undefined {

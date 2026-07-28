@@ -140,9 +140,9 @@ export function normalizeJSONSchema(value: unknown): JSONSchema | undefined {
 	return schema as JSONSchema;
 }
 
-export function withStructuredOutputInstruction(prompt: string, schema: JSONSchema | undefined): string {
-	if (schema === undefined) return prompt;
-	return `${prompt}\n\n[Structured output]\nReturn only one valid JSON value with no markdown fence or surrounding prose. The value must validate against this JSON Schema:\n${JSON.stringify(schema)}`;
+export function structuredOutputInstruction(schema: JSONSchema | undefined): string | undefined {
+	if (schema === undefined) return undefined;
+	return `[Workflow structured output contract]\nReturn only one valid JSON value with no markdown fence or surrounding prose. The value must validate against this JSON Schema:\n${JSON.stringify(schema)}`;
 }
 
 function jsonPath(pointer: string): string {
@@ -182,7 +182,7 @@ export function applyWorkflowProfile(prompt: string, value: unknown): { prompt: 
 	if (value === undefined) return { prompt };
 	const profile = getWorkflowProfile(value);
 	if (!profile) throw new Error(`Unknown workflow profile: ${String(value)}`);
-	return { profile, prompt: `[Specialist profile: ${profile.name}]\n${profile.instruction}\n\nAssignment:\n${prompt}` };
+	return { profile, prompt };
 }
 
 /** @deprecated Prefer validateStructuredOutput with the effective agent schema. */

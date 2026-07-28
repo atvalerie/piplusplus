@@ -18,7 +18,7 @@ Direct file policy resolves both the requested path and real path. For non-exist
 - QuickJS stack: 2 MiB.
 - Wall-clock deadline: 30 minutes by default, configurable per run from 1 second to 24 hours.
 - Workers: at most 1,000 total and 16 concurrent.
-- Optional user-owned scheduling thresholds: agent count, consumed input/output/cache tokens, and reported cost. Exhaustion blocks new starts, but already-running workers may report an in-flight overrun. Per-worker `maxTurns` and the workflow deadline terminate active work.
+- Optional user-owned scheduling thresholds: agent count, consumed input/output/cache tokens, and reported cost. Exhaustion blocks new starts, but already-running workers may report an in-flight overrun. Worker `maxTurns` has a separate persistent off/custom/model policy and defaults to unlimited; a custom or model-enabled limit and the workflow deadline terminate active work.
 - Size guidance: `small` <5 agents, `medium` <15, `large` <50, or `unrestricted`; warning thresholds are more than 25 scheduled agents or more than 1.5 million projected output tokens.
 - Worker stdout/NDJSON: 32 MiB maximum.
 - Worker stderr: 1 MiB retained.

@@ -14,6 +14,8 @@ Workflow artifacts are append-only audit snapshots, not executable configuration
 | v5 | Script/invocation/result hashes, dependency generations, cache state, restart invalidations, and structured workflow `args`. |
 | v6 | Workflow size, hard budgets/projections/warnings, `budget_exhausted` states, and per-agent `maxTurns`. |
 
+Current v6 writers also add the user-owned workflow `turnPolicy` and requested/effective/provider-mapped effort fields. These are additive v6 fields; older v6 readers must ignore them, and older v6 files without `turnPolicy` load with the safe current default of `off` (unlimited workers, script-proposed `maxTurns` ignored).
+
 ## Persisted run-state loading
 
 Same-session run files under `~/.pi/agent/workflows/runs/` are normalized on load:
@@ -21,6 +23,7 @@ Same-session run files under `~/.pi/agent/workflows/runs/` are normalized on loa
 - missing usage, logs, messages, events, scan findings, cache markers, and invalidation lists receive safe defaults;
 - an old `modelFamily` becomes a hard `allowedFamilies` entry;
 - absent routing defaults to `modelPolicy.defaultRouting: "inherit"`;
+- absent worker `turnPolicy` is interpreted as `off`, the current unlimited default;
 - legacy free-text `userModelInstruction` is retained in the old JSON but is **not parsed** into new policy constraints;
 - an interrupted queued/running/paused run becomes `stopped` and may be resumed within the same Pi session.
 

@@ -115,9 +115,10 @@ test("implement recipe crosses its semantic approval gate and completes its revi
 	assert.equal(approvals, 1);
 });
 
-test("specialist profiles add evidence rules and validate structured status", () => {
+test("specialist profiles keep evidence rules separate from the visible assignment and validate structured status", () => {
 	const applied = applyWorkflowProfile("Find the defect", "investigator");
-	assert.match(applied.prompt, /never fabricate evidence/i);
+	assert.equal(applied.prompt, "Find the defect");
+	assert.match(applied.profile?.instruction ?? "", /never fabricate evidence/i);
 	const valid = { status: "completed", paths: [], findings: [{ claim: "cause", evidence: ["src/a.ts:1"] }], unexplored: [], summary: "done" };
 	assert.deepEqual(validateProfileOutput(WORKFLOW_PROFILES.investigator, JSON.stringify(valid)).value, valid);
 	assert.match(validateProfileOutput(WORKFLOW_PROFILES.investigator, "not json").error ?? "", /valid JSON/);

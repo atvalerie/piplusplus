@@ -408,6 +408,23 @@ Verification passed 105/105 tests, native entrypoint imports, `git diff --check`
 - A regression test proves that a phase after `await parallel(...)` cannot start until every prior worker settles and that their structured results are available to the dependent agent.
 - Aggregate workflow budgets are now user-owned and default to `off`. Persistent modes are `off`, `custom`, and `model`; user settings override model-proposed budgets for direct, recipe, and saved workflows.
 - `/workflows budget` opens the editor. Direct forms are `/workflows budget off`, `/workflows budget model`, `/workflows budget custom 200000`, `/workflows budget custom {"maxTokens":200000,"maxAgents":3,"maxCost":5}`, and `/workflows budget status`.
-- `maxTokens` and `maxCost` are explicitly described as scheduling thresholds: they block new starts after reported exhaustion, while already-running parallel workers may overrun them. `maxTurns`, lower concurrency, and the workflow deadline provide tighter active-work bounds.
+- `maxTokens` and `maxCost` are explicitly described as scheduling thresholds: they block new starts after reported exhaustion, while already-running parallel workers may overrun them. Lower concurrency, an explicitly enabled custom/model `maxTurns` policy, and the workflow deadline provide tighter active-work bounds.
 
 Verification passed 111/111 tests, native entrypoint imports, `git diff --check`, parsing of the supplied Claude workflow file, and the global Pi loader smoke test `pi -ne -e ./ --no-skills --no-prompt-templates --offline --list-models` with exit code 0 and 24 ModelHub models.
+
+## Worker prompt presentation and effort telemetry — 2026-07-29
+
+- Structured-output JSON Schemas and reusable profile instructions are delivered through the worker's appended system prompt rather than being rendered as part of the user-visible assignment.
+- Child process logs redact both the assignment and the structured-output contract.
+- Omitted worker effort inherits the live Pi session effort. Explicit or inherited effort is clamped to the resolved model's supported Pi levels, mapped to the provider-specific value, passed explicitly to the child, and persisted as requested/effective/provider values.
+- `/workflows` shows effective effort in the agent list and requested/effective/provider-mapped values in agent details.
+- Regression tests cover prompt separation, schema/profile delivery, log redaction, explicit effort, inherited effort, capability clamping, provider mapping, UI rendering, and structured-output retry behavior.
+
+## User-owned worker maxTurns — 2026-07-29
+
+- Persistent worker-turn modes are `off`, `custom`, and `model`; the default is `off`, which means unlimited worker turns and ignores `maxTurns` emitted by workflow scripts.
+- `custom N` applies the same 1-1000 turn limit to every worker. `model` is the only mode that accepts per-agent `maxTurns` from the orchestrator.
+- Commands are `/workflows max-turns off`, `/workflows max-turns custom N`, `/workflows max-turns model`, `/workflows max-turns status`, and the interactive `/workflows max-turns` selector.
+- The active policy is included in launch approval, system instructions, live UI, persisted run state, and workflow artifacts.
+- Aggregate budget mode remains independently `off` by default.
+- Final verification passed 116/116 tests, native extension imports, `git diff --check`, and the global Pi loader smoke test.

@@ -24,6 +24,13 @@ function stats(run: WorkflowRun): string {
 	return `${run.usage.turns} turns · ↑${tokens(run.usage.input)} ↓${tokens(run.usage.output)} · $${run.usage.cost.toFixed(4)} · ${elapsed(run)}`;
 }
 
+function agentEffort(agent: AgentState): string {
+	const effective = agent.effectiveThinking ?? agent.thinking ?? "pending";
+	return agent.providerThinking && agent.providerThinking !== effective
+		? `${effective}→${agent.providerThinking}`
+		: effective;
+}
+
 export class WorkflowBrowser {
 	private level: "runs" | "phases" | "agents" | "detail" = "runs";
 	private runIndex = 0;
@@ -193,6 +200,12 @@ export class WorkflowBrowser {
 				lines.push(`  ${th.fg(run.budget.exhausted ? "warning" : "dim", `Scheduling budget: ${limits}`)}`);
 				for (const warning of run.budget.warnings) lines.push(`  ${th.fg("warning", `⚠ ${warning}`)}`);
 			}
+			const turns = run.spec.turnPolicy?.mode === "custom"
+				? `${run.spec.turnPolicy.maxTurns} per worker`
+				: run.spec.turnPolicy?.mode === "model"
+					? "model-controlled per worker"
+					: "unlimited";
+			lines.push(`  ${th.fg("dim", `Worker maxTurns: ${turns}`)}`);
 			for (const flag of run.flags) lines.push(`  ${th.fg("warning", `⚑ ${flag}`)}`);
 			if (run.error) lines.push(`  ${th.fg("error", run.error)}`);
 		} else if (this.level === "agents") {
@@ -202,7 +215,7 @@ export class WorkflowBrowser {
 			for (let i = 0; i < agents.length; i++) {
 				const agent = agents[i];
 				if (i === this.agentIndex) focusLine = lines.length;
-				lines.push(` ${i === this.agentIndex ? th.fg("accent", ">") : " "} ${icon(agent.status)} ${agent.label} ${th.fg("dim", `· ${agent.resolvedModel ?? agent.requestedModel ?? "auto"} · ${agent.cached ? "cached" : "live"} · ${agent.usage.turns} turns · $${agent.usage.cost.toFixed(4)}`)}`);
+				lines.push(` ${i === this.agentIndex ? th.fg("accent", ">") : " "} ${icon(agent.status)} ${agent.label} ${th.fg("dim", `· ${agent.resolvedModel ?? agent.requestedModel ?? "auto"} · effort ${agentEffort(agent)} · ${agent.cached ? "cached" : "live"} · ${agent.usage.turns} turns · $${agent.usage.cost.toFixed(4)}`)}`);
 				if (agent.error) lines.push(`     ${th.fg("error", agent.error)}`);
 			}
 		} else {
@@ -211,8 +224,10 @@ export class WorkflowBrowser {
 			lines.push(`  ${th.fg("muted", "Requested model: ")}${agent.requestedModel ?? "omitted (inherit by policy)"}`);
 			lines.push(`  ${th.fg("muted", "Resolved model: ")}${agent.resolvedModel ?? "(not resolved)"}`);
 			lines.push(`  ${th.fg("muted", "Reported model: ")}${agent.reportedModel ?? "(not reported)"}${agent.modelRationale ? th.fg("dim", ` — ${agent.modelRationale}`) : ""}`);
+			lines.push(`  ${th.fg("muted", "Requested effort: ")}${agent.thinking ?? "omitted (inherit session)"}`);
+			lines.push(`  ${th.fg("muted", "Effective effort: ")}${agent.effectiveThinking ?? "(not resolved)"}${agent.providerThinking && agent.providerThinking !== agent.effectiveThinking ? th.fg("dim", ` · provider value: ${agent.providerThinking}`) : ""}`);
 			if (agent.profile) lines.push(`  ${th.fg("muted", "Profile: ")}${agent.profile}${agent.writePaths ? th.fg("dim", ` · write scope: ${agent.writePaths.join(", ")}`) : ""}`);
-			lines.push(`  ${th.fg("muted", "State: ")}${agent.status} · ${agent.cached ? "cached" : "live"} · attempt ${agent.attempt} · ${agent.usage.turns}${agent.maxTurns ? `/${agent.maxTurns}` : ""} turns · $${agent.usage.cost.toFixed(4)}`, "");
+			lines.push(`  ${th.fg("muted", "State: ")}${agent.status} · ${agent.cached ? "cached" : "live"} · attempt ${agent.attempt} · ${agent.usage.turns}/${agent.maxTurns ?? "∞"} turns · $${agent.usage.cost.toFixed(4)}`, "");
 			const detail: string[] = [th.fg("accent", "Prompt"), ...wrapTextWithAnsi(agent.prompt, Math.max(10, width - 4)), "", th.fg("accent", "Tool calls")];
 			if (!agent.toolCalls.length) detail.push(th.fg("dim", "(none)"));
 			for (const tool of agent.toolCalls) detail.push(`${tool.error ? th.fg("error", "✗") : "→"} ${tool.name} ${th.fg("dim", JSON.stringify(tool.args ?? {}).slice(0, 300))}`);

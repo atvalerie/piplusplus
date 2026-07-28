@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { Message, Model } from "@earendil-works/pi-ai";
 import type { AgentState, ChildResult, PermissionRequest } from "./types.ts";
 import { terminateProcessTree } from "./processes.ts";
+import { getWorkflowProfile, structuredOutputInstruction } from "./profiles.ts";
 import { zeroUsage } from "./types.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
@@ -72,6 +73,34 @@ function finalText(messages: Message[]): string {
 	return "";
 }
 
+export function buildChildAgentArgs(agent: AgentState, model: Pick<Model, "provider" | "id">): string[] {
+	const args = ["--mode", "json", "-p", "--no-session", "-e", fileURLToPath(new URL("./permission-child.ts", import.meta.url)), "--model", `${model.provider}/${model.id}`];
+	const thinking = agent.effectiveThinking ?? agent.thinking;
+	if (thinking) args.push("--thinking", thinking);
+	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
+	const systemInstructions: string[] = [];
+	const profile = getWorkflowProfile(agent.profile);
+	if (profile) systemInstructions.push(`[Workflow specialist profile: ${profile.name}]\n${profile.instruction}`);
+	const structuredContract = structuredOutputInstruction(agent.schema);
+	if (structuredContract) systemInstructions.push(structuredContract);
+	if (systemInstructions.length) args.push("--append-system-prompt", systemInstructions.join("\n\n"));
+	args.push(agent.prompt);
+	return args;
+}
+
+export function formatChildInvocationForLog(command: string, args: string[]): string {
+	const visible: string[] = [];
+	for (let index = 0; index < args.length - 1; index++) {
+		const value = args[index];
+		visible.push(value);
+		if (value === "--append-system-prompt" && index + 1 < args.length - 1) {
+			visible.push("[structured-output-contract]");
+			index++;
+		}
+	}
+	return `${command} ${visible.join(" ")}`;
+}
+
 export function shouldTerminateAtTurnLimit(message: Message, turns: number, maxTurns: number | undefined): boolean {
 	if (!maxTurns || turns < maxTurns || message.role !== "assistant") return false;
 	const hasToolCall = message.content.some((part) => part.type === "toolCall");
@@ -95,11 +124,7 @@ export async function runChildAgent(
 	onUpdate: () => void,
 	onPermission: (request: PermissionRequest) => Promise<boolean>,
 ): Promise<ChildResult> {
-	const permissionExtension = fileURLToPath(new URL("./permission-child.ts", import.meta.url));
-	const args = ["--mode", "json", "-p", "--no-session", "-e", permissionExtension, "--model", `${model.provider}/${model.id}`];
-	if (agent.thinking) args.push("--thinking", agent.thinking);
-	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
-	args.push(agent.prompt);
+	const args = buildChildAgentArgs(agent, model);
 	const call = invocation(args);
 	const messages: Message[] = [];
 	const usage = zeroUsage();
@@ -136,7 +161,7 @@ export async function runChildAgent(
 			addLog({ at: Date.now(), type: "max_turns", message: errorMessage });
 			terminateProcessTree(proc);
 		});
-		addLog({ at: Date.now(), type: "process_start", message: `${call.command} ${call.args.slice(0, -1).join(" ")}` });
+		addLog({ at: Date.now(), type: "process_start", message: formatChildInvocationForLog(call.command, call.args) });
 		const permissionOutput = proc.stdio[3];
 		const permissionInput = proc.stdio[4];
 		if (permissionOutput && permissionInput) {

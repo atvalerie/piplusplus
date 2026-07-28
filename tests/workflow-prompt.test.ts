@@ -20,14 +20,15 @@ function models(count: number, uniqueFamilies = false): ModelChoice[] {
 }
 
 test("main workflow system instructions stay bounded as the catalog grows", () => {
-	const small = buildWorkflowSystemInstructions({ models: models(24), ultracodeTriggered: false, ultracodeEffortMode: "one-prompt", budgetPolicy: "off" });
-	const huge = buildWorkflowSystemInstructions({ models: models(2_000, true), ultracodeTriggered: false, ultracodeEffortMode: "one-prompt", budgetPolicy: "off" });
+	const small = buildWorkflowSystemInstructions({ models: models(24), ultracodeTriggered: false, ultracodeEffortMode: "one-prompt", budgetPolicy: "off", maxTurnsPolicy: "off (unlimited)" });
+	const huge = buildWorkflowSystemInstructions({ models: models(2_000, true), ultracodeTriggered: false, ultracodeEffortMode: "one-prompt", budgetPolicy: "off", maxTurnsPolicy: "off (unlimited)" });
 	assert.ok(small.length < 3_500, `small prompt was ${small.length} chars`);
 	assert.ok(huge.length < 3_500, `huge prompt was ${huge.length} chars`);
 	assert.ok(Math.abs(huge.length - small.length) < 600);
 	assert.doesNotMatch(huge, /private-exact-model-id-/);
 	assert.match(huge, /workflow_models/);
 	assert.match(huge, /original language/);
+	assert.match(huge, /worker-turn policy.*off \(unlimited\)/);
 });
 
 test("compact catalog summary materially reduces a representative ModelHub prompt", () => {

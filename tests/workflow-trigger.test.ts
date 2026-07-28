@@ -5,11 +5,14 @@ import * as path from "node:path";
 import test from "node:test";
 import {
 	applyWorkflowBudgetSettings,
+	applyWorkflowSettings,
 	DEFAULT_WORKFLOW_SETTINGS,
 	describeWorkflowBudgetSettings,
+	describeWorkflowMaxTurnsSettings,
 	isInteractiveUltracodeTrigger,
 	loadWorkflowSettings,
 	normalizeCustomBudgets,
+	normalizeCustomMaxTurns,
 	saveWorkflowSettings,
 	workflowSettingsPath,
 } from "../extensions/workflows/settings.ts";
@@ -27,11 +30,11 @@ test("workflow trigger and effort settings persist independently from runs and a
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-workflow-settings-"));
 	try {
 		assert.deepEqual(await loadWorkflowSettings(agentDir), DEFAULT_WORKFLOW_SETTINGS);
-		await saveWorkflowSettings(agentDir, { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off" });
-		assert.deepEqual(await loadWorkflowSettings(agentDir), { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off" });
+		await saveWorkflowSettings(agentDir, { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off", maxTurnsMode: "off" });
+		assert.deepEqual(await loadWorkflowSettings(agentDir), { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off", maxTurnsMode: "off" });
 		assert.equal(path.basename(workflowSettingsPath(agentDir)), "settings.json");
 		const parsed = JSON.parse(fs.readFileSync(workflowSettingsPath(agentDir), "utf8"));
-		assert.deepEqual(parsed, { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off" });
+		assert.deepEqual(parsed, { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off", maxTurnsMode: "off" });
 	} finally {
 		fs.rmSync(agentDir, { recursive: true, force: true });
 	}
@@ -63,4 +66,25 @@ test("user-owned workflow budget mode overrides model-proposed limits", () => {
 	assert.deepEqual(normalizeCustomBudgets({ maxTokens: 200_000, maxCost: 5 }), { maxTokens: 200_000, maxCost: 5 });
 	assert.throws(() => normalizeCustomBudgets({ maxTokens: 0 }), /positive integer/);
 	assert.match(describeWorkflowBudgetSettings(DEFAULT_WORKFLOW_SETTINGS), /^off/);
+});
+
+test("user-owned maxTurns mode defaults to unlimited and overrides script limits", () => {
+	const spec = {
+		name: "turns", why: "test", goal: "test", prompt: "test",
+		script: `return agent("work", { maxTurns: 2 })`,
+		modelPolicy: { defaultRouting: "inherit", rationale: "test" },
+	} as any;
+
+	assert.deepEqual(applyWorkflowSettings(spec, DEFAULT_WORKFLOW_SETTINGS).turnPolicy, { mode: "off" });
+	assert.deepEqual(
+		applyWorkflowSettings(spec, { ...DEFAULT_WORKFLOW_SETTINGS, maxTurnsMode: "custom", customMaxTurns: 17 }).turnPolicy,
+		{ mode: "custom", maxTurns: 17 },
+	);
+	assert.deepEqual(
+		applyWorkflowSettings(spec, { ...DEFAULT_WORKFLOW_SETTINGS, maxTurnsMode: "model" }).turnPolicy,
+		{ mode: "model" },
+	);
+	assert.equal(normalizeCustomMaxTurns("1000"), 1000);
+	assert.throws(() => normalizeCustomMaxTurns(0), /1 to 1000/);
+	assert.match(describeWorkflowMaxTurnsSettings(DEFAULT_WORKFLOW_SETTINGS), /unlimited/);
 });
