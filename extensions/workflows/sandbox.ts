@@ -6,6 +6,9 @@ export interface SandboxBindings {
 	log(value: unknown): void;
 	models: unknown;
 	workflowPrompt: string;
+	/** Copied metadata only; grants no host capabilities. */
+	cwd?: string;
+	platform?: string;
 }
 
 export interface SandboxOptions {
@@ -25,7 +28,7 @@ function guestValue(vm: QuickJSContext, value: unknown): QuickJSHandle {
 	return vm.newString(JSON.stringify(value));
 }
 
-/** Execute orchestration in QuickJS/WASM. Guest code has no Node, filesystem, process, network, or module capability. */
+/** Execute orchestration in QuickJS/WASM. Guest code has no Node, filesystem, network, module, or real process capability. */
 export async function executeSandboxedWorkflow(source: string, bindings: SandboxBindings, options: SandboxOptions): Promise<unknown> {
 	const QuickJS = await getQuickJS();
 	const runtime = QuickJS.newRuntime();
@@ -73,8 +76,13 @@ export async function executeSandboxedWorkflow(source: string, bindings: Sandbox
 	install("__log", (valueHandle) => { bindings.log(vm.dump(valueHandle)); return vm.undefined; });
 	install("__models", () => vm.newString(JSON.stringify(bindings.models)));
 	vm.setProp(vm.global, "workflowPrompt", vm.newString(bindings.workflowPrompt));
+	vm.setProp(vm.global, "__workflowCwd", vm.newString(bindings.cwd ?? ""));
+	vm.setProp(vm.global, "__workflowPlatform", vm.newString(bindings.platform ?? "unknown"));
 
 	const prelude = `
+const cwd = __workflowCwd;
+const platform = __workflowPlatform;
+const process = Object.freeze({ platform, cwd: () => cwd });
 let __workflowPhase = "Workflow";
 const phase = (name) => { __workflowPhase = String(name); return __phase(name); };
 const agent = (prompt, options = {}) => __agent(prompt, options, __workflowPhase);

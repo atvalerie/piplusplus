@@ -2,7 +2,7 @@
 
 ## Trust boundaries
 
-Workflow orchestration JavaScript is untrusted. It executes in a QuickJS WebAssembly runtime, not Node's `vm`. The guest has no Node globals, module loader, filesystem, process, network, environment, native addon, or host-realm object. Only copied JSON values and these capabilities cross the boundary: `agent`, `phase`, `models`, `log`, and `workflowPrompt`. `parallel` and `pipeline` execute inside QuickJS.
+Workflow orchestration JavaScript is untrusted. It executes in a QuickJS WebAssembly runtime, not Node's `vm`. The guest has no Node globals, module loader, filesystem, network, environment, native addon, or host-realm object. It receives copied `cwd` and `platform` strings plus a frozen, capability-free compatibility object exposing only `process.cwd()` and `process.platform`; this is not Node's process object. Only copied JSON values and these capabilities cross the boundary: `agent`, `phase`, `models`, `log`, `workflowPrompt`, `cwd`, and `platform`. `parallel` and `pipeline` execute inside QuickJS.
 
 Subagents are separate Pi processes. Their tool calls are not trusted merely because the workflow script was approved: they pass through the optional global Pi++ permission service. If that dependency is absent, workflow workers fail closed to read-only operations.
 

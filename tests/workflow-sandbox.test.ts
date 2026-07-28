@@ -1,18 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { normalizeWorkflowTools } from "../extensions/workflows/runtime.ts";
 import { executeSandboxedWorkflow, type SandboxBindings } from "../extensions/workflows/sandbox.ts";
 
 function bindings(agent: SandboxBindings["agent"] = async (prompt) => String(prompt)): SandboxBindings {
-	return { agent, phase: () => {}, log: () => {}, models: [{ id: "model" }], workflowPrompt: "original" };
+	return { agent, phase: () => {}, log: () => {}, models: [{ id: "model" }], workflowPrompt: "original", cwd: "C:\\repo", platform: "win32" };
 }
+
+test("workflow tool aliases normalize generated read-only configurations", () => {
+	assert.deepEqual(normalizeWorkflowTools("read-only"), ["read", "grep", "find", "ls"]);
+	assert.deepEqual(normalizeWorkflowTools("read,grep"), ["read", "grep"]);
+	assert.equal(normalizeWorkflowTools("all"), undefined);
+});
 
 test("workflow JavaScript has no Node or host-realm capabilities", async () => {
 	const result = await executeSandboxedWorkflow(`
 		let escaped;
 		try { escaped = agent.constructor("return typeof process")(); } catch (error) { escaped = "blocked"; }
-		return { process: typeof process, require: typeof require, fetch: typeof fetch, escaped };
+		return { process: typeof process, cwd, platform, processCwd: process.cwd(), processPlatform: process.platform, env: typeof process.env, require: typeof require, fetch: typeof fetch, escaped, frozen: Object.isFrozen(process) };
 	`, bindings(), { timeoutMs: 2_000 });
-	assert.deepEqual(result, { process: "undefined", require: "undefined", fetch: "undefined", escaped: "undefined" });
+	assert.deepEqual(result, { process: "object", cwd: "C:\\repo", platform: "win32", processCwd: "C:\\repo", processPlatform: "win32", env: "undefined", require: "undefined", fetch: "undefined", escaped: "object", frozen: true });
 });
 
 test("sandbox preserves dependent and parallel JavaScript orchestration", async () => {

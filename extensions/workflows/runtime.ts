@@ -18,14 +18,24 @@ import {
 const MAX_AGENTS = 1_000;
 const MAX_CONCURRENCY = 16;
 const MAX_FINAL_OUTPUT = 50_000;
+const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
+
+export function normalizeWorkflowTools(value: unknown): string[] | undefined {
+	if (value === undefined || value === null || value === "all") return undefined;
+	if (value === "read-only") return [...READ_ONLY_TOOLS];
+	if (typeof value === "string") return value.split(",").map((tool) => tool.trim()).filter(Boolean);
+	if (Array.isArray(value) && value.every((tool) => typeof tool === "string")) return [...new Set(value.map((tool) => tool.trim()).filter(Boolean))];
+	throw new Error("agent tools must be an array, comma-separated string, 'read-only', or 'all'");
+}
 
 class Scheduler {
 	private active = 0;
 	private paused = false;
 	private stopped = false;
 	private waiters: Array<() => void> = [];
+	private readonly concurrency: number;
 
-	constructor(private readonly concurrency: number) {}
+	constructor(concurrency: number) { this.concurrency = concurrency; }
 
 	async acquire(): Promise<boolean> {
 		while (!this.stopped && (this.paused || this.active >= this.concurrency)) {
@@ -144,6 +154,7 @@ export function createWorkflowController(
 		const id = options.id ?? `agent_${++sequence}`;
 		if (run.agents.some((agent) => agent.id === id)) throw new Error(`Duplicate agent id: ${id}`);
 		const kind: StepKind = options.kind ?? "general";
+		const tools = normalizeWorkflowTools(options.tools);
 		const agent: AgentState = {
 			id,
 			label: options.label ?? id,
@@ -153,7 +164,7 @@ export function createWorkflowController(
 			requestedModel: options.model,
 			modelRationale: options.modelRationale,
 			thinking: options.thinking,
-			tools: options.tools,
+			tools,
 			status: "queued",
 			createdAt: Date.now(),
 			flags: [],
@@ -254,6 +265,8 @@ export function createWorkflowController(
 				},
 				models: serializeModels(models),
 				workflowPrompt: run.spec.prompt,
+				cwd: run.cwd,
+				platform: process.platform,
 				log: (value) => update(`log:${String(value).slice(0, 200)}`),
 			}, {
 				timeoutMs: run.spec.timeoutMs ?? 30 * 60_000,
