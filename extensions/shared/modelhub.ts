@@ -42,6 +42,14 @@ function apiFor(model: ModelHubCatalogModel): ProviderModelConfig["api"] {
 	return "openai-completions";
 }
 
+function anthropicEffort(model: ModelHubCatalogModel): { adaptive: boolean; map?: Record<string, string> } {
+	if (model.family !== "anthropic" || !model.capabilities.reasoning) return { adaptive: false };
+	const adaptive = /^claude-(?:opus-(?:4-[6-9]|[5-9])|sonnet-(?:4-6|[5-9])|fable-[5-9])/i.test(model.id);
+	if (!adaptive) return { adaptive: false };
+	const nativeXhigh = /^claude-(?:opus-(?:4-[78]|[5-9])|sonnet-[5-9]|fable-[5-9])/i.test(model.id);
+	return { adaptive: true, map: nativeXhigh ? { xhigh: "xhigh", max: "max" } : { max: "max" } };
+}
+
 export function catalogToModels(catalog: ModelHubCatalog): ProviderModelConfig[] {
 	const prices = new Map(catalog.prices.map((price) => [price.model, price]));
 	return catalog.catalog
@@ -49,17 +57,23 @@ export function catalogToModels(catalog: ModelHubCatalog): ProviderModelConfig[]
 		.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
 		.map((model) => {
 			const price = prices.get(model.id);
+			const api = apiFor(model);
+			const modelHubGptEffort = model.family === "openai" && /^gpt-/i.test(model.id) && model.capabilities.reasoning
+				? { xhigh: "xhigh", max: "xhigh" }
+				: undefined;
+			const claudeEffort = anthropicEffort(model);
 			return {
 				id: model.id,
 				name: `${model.id} · ${model.provider}${model.free ? " · free" : ""}`,
-				api: apiFor(model),
-				baseUrl: apiFor(model) === "anthropic-messages" ? MODELHUB_BASE_URL : `${MODELHUB_BASE_URL}/v1`,
+				api,
+				baseUrl: api === "anthropic-messages" ? MODELHUB_BASE_URL : `${MODELHUB_BASE_URL}/v1`,
 				reasoning: Boolean(model.capabilities.reasoning),
+				thinkingLevelMap: modelHubGptEffort ?? claudeEffort.map,
 				input: model.capabilities.vision ? ["text", "image"] : ["text"],
 				cost: { input: price?.input_per_mtok ?? 0, output: price?.output_per_mtok ?? 0, cacheRead: price?.cache_read_per_mtok ?? 0, cacheWrite: 0 },
 				contextWindow: model.context_window,
 				maxTokens: Math.min(model.context_window, 65_536),
-				compat: apiFor(model) === "openai-completions" && model.capabilities.reasoning ? { supportsReasoningEffort: true } : undefined,
+				compat: claudeEffort.adaptive ? { forceAdaptiveThinking: true } : api === "openai-completions" && model.capabilities.reasoning ? { supportsReasoningEffort: true } : undefined,
 			} satisfies ProviderModelConfig;
 		});
 }

@@ -74,6 +74,13 @@ export function createWorkflowController(
 	let sequence = 0;
 	let stopped = false;
 	let timedOut = false;
+	const retryWaiters = new Map<string, () => void>();
+
+	const waitForRetry = (agent: AgentState, delayMs: number) => new Promise<void>((resolve) => {
+		const timer = setTimeout(finish, delayMs);
+		function finish() { clearTimeout(timer); retryWaiters.delete(agent.id); resolve(); }
+		retryWaiters.set(agent.id, finish);
+	});
 
 	const update = (event: string, agent?: AgentState) => {
 		run.usage = aggregateUsage(run.agents);
@@ -98,6 +105,7 @@ export function createWorkflowController(
 		stop() {
 			if (!["queued", "running", "paused"].includes(run.status)) return;
 			stopped = true;
+			for (const wake of retryWaiters.values()) wake();
 			scheduler.stop();
 			for (const agent of run.agents) {
 				if (agent.status === "queued" || agent.status === "running") {
@@ -114,6 +122,7 @@ export function createWorkflowController(
 			const agent = run.agents.find((candidate) => candidate.id === id);
 			if (!agent || !["queued", "running"].includes(agent.status)) return;
 			agent.stopRequested = true;
+			retryWaiters.get(id)?.();
 			if (agent.process) terminateProcessTree(agent.process);
 			agent.status = "stopped";
 			agent.finishedAt = Date.now();
@@ -150,6 +159,8 @@ export function createWorkflowController(
 			flags: [],
 			usage: zeroUsage(),
 			toolCalls: [],
+			messages: [],
+			events: [],
 			logs: [],
 			attempt: 0,
 		};
@@ -175,12 +186,6 @@ export function createWorkflowController(
 				agent.restartRequested = false;
 				update("agent_started", agent);
 				const result = await runChildAgent(run.cwd, agent, model, () => update("agent_progress", agent), callbacks.requestPermission);
-				agent.usage.input += result.usage.input;
-				agent.usage.output += result.usage.output;
-				agent.usage.cacheRead += result.usage.cacheRead;
-				agent.usage.cacheWrite += result.usage.cacheWrite;
-				agent.usage.cost += result.usage.cost;
-				agent.usage.turns += result.usage.turns;
 				if (agent.restartRequested) {
 					agent.status = "queued";
 					agent.error = undefined;
@@ -192,10 +197,27 @@ export function createWorkflowController(
 				if (agent.stopRequested || stopped) { agent.status = "stopped"; agent.finishedAt = Date.now(); update("agent_stopped", agent); return null; }
 				const failed = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted" || !result.output;
 				if (failed) {
+					if (result.output) agent.output = result.output;
+					const error = result.errorMessage || result.stderr.trim() || `Worker exited with code ${result.exitCode}`;
+					const maxRetries = Math.max(0, Math.min(10, run.spec.maxRetries ?? 3));
+					if (agent.attempt <= maxRetries) {
+						const base = Math.max(100, Math.min(60_000, run.spec.retryBaseMs ?? 1_000));
+						const delay = Math.min(60_000, base * 2 ** (agent.attempt - 1));
+						agent.status = "queued";
+						agent.error = `${error} · retrying in ${(delay / 1_000).toFixed(delay < 1_000 ? 1 : 0)}s`;
+						agent.nextRetryAt = Date.now() + delay;
+						agent.logs.push({ at: Date.now(), type: "retry_scheduled", message: `attempt ${agent.attempt}/${maxRetries + 1}: ${error}` });
+						update("agent_retry_scheduled", agent);
+						await waitForRetry(agent, delay);
+						agent.nextRetryAt = undefined;
+						if (stopped || agent.stopRequested) continue;
+						agent.error = undefined;
+						continue;
+					}
 					agent.status = "failed";
-					agent.error = result.errorMessage || result.stderr.trim() || `Worker exited with code ${result.exitCode}`;
+					agent.error = error;
 					agent.finishedAt = Date.now();
-					callbacks.notify(`${run.spec.name} / ${agent.label} failed: ${agent.error.slice(0, 300)}`, "error");
+					callbacks.notify(`${run.spec.name} / ${agent.label} failed after ${agent.attempt} attempts: ${agent.error.slice(0, 300)}`, "error");
 					update("agent_failed", agent);
 					return null;
 				}
@@ -239,6 +261,7 @@ export function createWorkflowController(
 				onTimeout: () => {
 					timedOut = true;
 					stopped = true;
+					for (const wake of retryWaiters.values()) wake();
 					scheduler.stop();
 					for (const agent of run.agents) {
 						if (!["queued", "running"].includes(agent.status)) continue;

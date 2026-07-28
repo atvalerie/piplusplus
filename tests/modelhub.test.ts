@@ -26,6 +26,18 @@ test("ModelHub catalog maps compatible endpoints, capabilities, and live prices"
 	assert.equal(models[1].api, "openai-responses");
 	assert.equal(models[1].baseUrl, "https://modelhub.my/v1");
 	assert.equal(models[1].cost.cacheRead, 0.005);
+	assert.deepEqual(models[1].thinkingLevelMap, { xhigh: "xhigh", max: "xhigh" });
+	assert.equal(models[0].thinkingLevelMap, undefined);
+
+	const claudeModels = catalogToModels({ ...catalog, prices: [], catalog: [
+		{ ...catalog.catalog[0], id: "claude-opus-4-8" },
+		{ ...catalog.catalog[0], id: "claude-sonnet-4-6" },
+		{ ...catalog.catalog[0], id: "claude-haiku-4-5" },
+	] });
+	assert.deepEqual(claudeModels[0].thinkingLevelMap, { xhigh: "xhigh", max: "max" });
+	assert.deepEqual(claudeModels[0].compat, { forceAdaptiveThinking: true });
+	assert.deepEqual(claudeModels[1].thinkingLevelMap, { max: "max" });
+	assert.equal(claudeModels[2].thinkingLevelMap, undefined);
 });
 
 test("ModelHub dashboard cookie accepts either the JWT value or complete cookie", () => {

@@ -14,6 +14,7 @@ const MAX_STREAM_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 1024 * 1024;
 const MAX_LOG_EVENTS = 100_000;
 const MAX_TOOL_CALLS = 10_000;
+const MAX_RAW_EVENTS = 50_000;
 
 function invocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
@@ -94,6 +95,8 @@ export async function runChildAgent(
 			if (!line.trim()) return;
 			let event: any;
 			try { event = JSON.parse(line); } catch { addLog({ at: Date.now(), type: "unparsed_output", message: line.slice(0, 8_192) }); return; }
+			if (agent.events.length < MAX_RAW_EVENTS) agent.events.push({ at: Date.now(), attempt: agent.attempt, event });
+			else agent.droppedEvents = (agent.droppedEvents ?? 0) + 1;
 			addLog({ at: Date.now(), type: event.type ?? "event", tool: event.toolName });
 			if (event.type === "agent_settled") {
 				settled = true;
@@ -110,15 +113,22 @@ export async function runChildAgent(
 			if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
 				const message = event.message as Message;
 				messages.push(message);
+				agent.messages.push(message);
 				if (message.role === "assistant") {
 					usage.turns++;
+					agent.usage.turns++;
 					const current = message.usage;
 					if (current) {
-						usage.input += current.input || 0;
-						usage.output += current.output || 0;
-						usage.cacheRead += current.cacheRead || 0;
-						usage.cacheWrite += current.cacheWrite || 0;
-						usage.cost += current.cost?.total || 0;
+						const input = current.input || 0;
+						const output = current.output || 0;
+						const cacheRead = current.cacheRead || 0;
+						const cacheWrite = current.cacheWrite || 0;
+						const cost = current.cost?.total || 0;
+						usage.input += input; agent.usage.input += input;
+						usage.output += output; agent.usage.output += output;
+						usage.cacheRead += cacheRead; agent.usage.cacheRead += cacheRead;
+						usage.cacheWrite += cacheWrite; agent.usage.cacheWrite += cacheWrite;
+						usage.cost += cost; agent.usage.cost += cost;
 					}
 					selectedModel ||= message.model;
 					stopReason = message.stopReason;

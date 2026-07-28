@@ -14,6 +14,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 	let mode: GlobalPermissionMode = "manual";
 	let currentContext: ExtensionContext | undefined;
 	let queue: Promise<void> = Promise.resolve();
+	const listeners = new Set<() => void>();
 	try {
 		const value = JSON.parse(fs.readFileSync(configPath, "utf8"))?.mode;
 		if (MODES.includes(value)) mode = value;
@@ -28,7 +29,8 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 
 	const service: PermissionService = {
 		getMode: () => mode,
-		async setMode(value) { mode = value; await persist(); },
+		async setMode(value) { mode = value; await persist(); for (const listener of listeners) listener(); },
+		subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
 		async authorize(request, suppliedContext, options) {
 			const ctx = suppliedContext ?? currentContext;
 			const cwd = ctx?.cwd ?? process.cwd();
@@ -74,5 +76,5 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", (_event, ctx) => { currentContext = ctx; });
-	pi.on("session_shutdown", () => { currentContext = undefined; removePermissionService(service); });
+	pi.on("session_shutdown", () => { currentContext = undefined; listeners.clear(); removePermissionService(service); });
 }

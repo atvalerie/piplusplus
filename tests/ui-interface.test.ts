@@ -29,6 +29,7 @@ const snapshot: FooterSnapshot = {
 	cost: 0.084,
 	providerBalance: 1.65,
 	providerSavings: 0.012,
+	permissionMode: "auto",
 	statuses: ["2 workflows"],
 };
 
@@ -38,8 +39,10 @@ test("footer responds at compact, regular, and wide widths", () => {
 		assert.equal(lines.length, 1);
 		assert.ok(visibleWidth(lines[0]) <= width);
 	}
+	assert.match(renderFooter(snapshot, 36, theme)[0], /perm:auto/);
 	assert.match(renderFooter(snapshot, 36, theme)[0], /gpt-5\.4/);
 	assert.match(renderFooter(snapshot, 72, theme)[0], /piplusplus/);
+	assert.match(renderFooter(snapshot, 72, theme)[0], /2 workflows/);
 	assert.match(renderFooter(snapshot, 120, theme)[0], /2 workflows/);
 	assert.match(renderFooter(snapshot, 160, theme)[0], /bal \$1\.65/);
 	assert.match(renderFooter(snapshot, 160, theme)[0], /saved ~\$0\.012/);

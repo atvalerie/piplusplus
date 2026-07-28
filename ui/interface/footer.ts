@@ -14,6 +14,7 @@ export interface FooterSnapshot {
 	cost: number;
 	providerBalance?: number;
 	providerSavings?: number;
+	permissionMode?: string;
 	statuses?: readonly string[];
 }
 
@@ -24,8 +25,10 @@ export function formatCount(value: number): string {
 }
 
 function spread(left: string, right: string, width: number): string {
-	const room = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-	return fitLine(`${left}${" ".repeat(room)}${right}`, width);
+	const rightWidth = visibleWidth(right);
+	if (rightWidth >= width) return fitLine(right, width);
+	const leftWidth = Math.max(1, width - rightWidth - 1);
+	return `${fitLine(left, leftWidth)} ${right}`;
 }
 
 export function renderFooter(snapshot: FooterSnapshot, width: number, theme: Theme): string[] {
@@ -35,8 +38,15 @@ export function renderFooter(snapshot: FooterSnapshot, width: number, theme: The
 	const context = snapshot.contextPercent === undefined ? "ctx —" : `ctx ${Math.max(0, Math.min(999, Math.round(snapshot.contextPercent)))}%`;
 	const provider = snapshot.providerBalance === undefined ? "" : ` · bal $${snapshot.providerBalance.toFixed(2)}${snapshot.providerSavings === undefined ? "" : ` · saved ~$${snapshot.providerSavings.toFixed(3)}`}`;
 	const usage = paint(theme, `${context} · ↑${formatCount(snapshot.inputTokens)} ↓${formatCount(snapshot.outputTokens)} · $${snapshot.cost.toFixed(3)}${provider}`, "subtle");
-	if (width < 52) return [fitLine(`${model} · ${context}`, width)];
-	if (width < 92) return [spread(project, `${model} · ${paint(theme, context, "subtle")}`, width)];
-	const status = snapshot.statuses?.length ? ` · ${snapshot.statuses.slice(0, 2).join(" · ")}` : "";
-	return [spread(`${project}${status}`, `${model}   ${usage}`, width)];
+	const permission = snapshot.permissionMode
+		? paint(theme, `perm:${snapshot.permissionMode}`, snapshot.permissionMode === "auto" ? "success" : snapshot.permissionMode === "manual" ? "warning" : "muted", "strong")
+		: paint(theme, "perm:—", "subtle");
+	if (width < 52) return [fitLine(`${permission} · ${model} · ${context}`, width)];
+	const activity = snapshot.statuses?.filter(Boolean) ?? [];
+	if (width < 92) {
+		const status = width >= 72 && activity.length ? ` · ${activity[0]}` : "";
+		return [spread(`${project} · ${permission}${status}`, `${model} · ${paint(theme, context, "subtle")}`, width)];
+	}
+	const status = activity.length ? ` · ${activity.slice(0, 3).join(" · ")}` : "";
+	return [spread(`${project} · ${permission}${status}`, `${model}   ${usage}`, width)];
 }

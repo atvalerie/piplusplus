@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import type { Message } from "@earendil-works/pi-ai";
 
 export type StepKind = "research" | "discovery" | "planning" | "implementation" | "review" | "verification" | "synthesis" | "general";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -71,9 +72,15 @@ export interface AgentState {
 	flags: string[];
 	usage: UsageStats;
 	toolCalls: Array<{ name: string; args?: unknown; error?: boolean }>;
+	/** Complete assistant/tool messages emitted by all attempts. */
+	messages: Message[];
+	/** Bounded raw Pi JSON-mode stream, preserving reasoning and tool result events when emitted. */
+	events: Array<{ at: number; attempt: number; event: unknown }>;
 	logs: AgentLogEntry[];
 	droppedLogEvents?: number;
+	droppedEvents?: number;
 	attempt: number;
+	nextRetryAt?: number;
 	/** Runtime-only fields are omitted by JSON persistence. */
 	process?: ChildProcess;
 	restartRequested?: boolean;
@@ -100,6 +107,10 @@ export interface WorkflowSpec {
 	background?: boolean;
 	approval?: "prompt" | "skip";
 	timeoutMs?: number;
+	/** Retries after a failed child attempt. Defaults to 3. */
+	maxRetries?: number;
+	/** Initial exponential retry delay. Defaults to 1000ms. */
+	retryBaseMs?: number;
 }
 
 export interface WorkflowRun {

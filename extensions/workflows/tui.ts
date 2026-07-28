@@ -27,13 +27,20 @@ export class WorkflowBrowser {
 	private phaseIndex = 0;
 	private agentIndex = 0;
 	private scroll = 0;
+	private detailMaxScroll = 0;
+	private readonly getRuns: () => WorkflowRun[];
+	private readonly controllers: Map<string, WorkflowController>;
+	private readonly theme: Theme;
+	private readonly close: () => void;
+	private readonly height: number;
 
-	constructor(
-		private readonly getRuns: () => WorkflowRun[],
-		private readonly controllers: Map<string, WorkflowController>,
-		private readonly theme: Theme,
-		private readonly close: () => void,
-	) {}
+	constructor(getRuns: () => WorkflowRun[], controllers: Map<string, WorkflowController>, theme: Theme, close: () => void, height = 30) {
+		this.getRuns = getRuns;
+		this.controllers = controllers;
+		this.theme = theme;
+		this.close = close;
+		this.height = height;
+	}
 
 	private run(): WorkflowRun | undefined { return this.getRuns()[this.runIndex]; }
 	private phases(): string[] { return this.run()?.phases ?? []; }
@@ -69,8 +76,13 @@ export class WorkflowBrowser {
 			return;
 		}
 		if (this.level === "detail") {
-			if (data === "j" || matchesKey(data, Key.down)) this.scroll++;
-			if (data === "k" || matchesKey(data, Key.up)) this.scroll = Math.max(0, this.scroll - 1);
+			const mouse = data.match(/^\x1b\[<(\d+);\d+;\d+[Mm]$/);
+			const button = mouse ? Number(mouse[1]) : undefined;
+			if (data === "j" || matchesKey(data, Key.down) || (button !== undefined && (button & 64) !== 0 && (button & 1) === 1)) this.scroll++;
+			if (data === "k" || matchesKey(data, Key.up) || (button !== undefined && (button & 64) !== 0 && (button & 1) === 0)) this.scroll = Math.max(0, this.scroll - 1);
+			if (matchesKey(data, Key.pageDown)) this.scroll += Math.max(1, this.height - 12);
+			if (matchesKey(data, Key.pageUp)) this.scroll = Math.max(0, this.scroll - Math.max(1, this.height - 12));
+			this.scroll = Math.max(0, Math.min(this.detailMaxScroll, this.scroll));
 			return;
 		}
 		const max = this.level === "runs" ? this.getRuns().length : this.level === "phases" ? this.phases().length : this.agents().length;
@@ -95,6 +107,7 @@ export class WorkflowBrowser {
 	render(width: number): string[] {
 		const th = this.theme;
 		const lines: string[] = ["", `  ${th.fg("accent", th.bold("Dynamic workflows"))} ${th.fg("dim", `· ${this.level}`)}`, ""];
+		let focusLine = 3;
 		const runs = this.getRuns();
 		this.runIndex = Math.min(this.runIndex, Math.max(0, runs.length - 1));
 		if (this.level === "runs") {
@@ -102,6 +115,7 @@ export class WorkflowBrowser {
 			for (let i = 0; i < runs.length; i++) {
 				const run = runs[i];
 				const selected = i === this.runIndex ? th.fg("accent", ">") : " ";
+				if (i === this.runIndex) focusLine = lines.length;
 				lines.push(` ${selected} ${icon(run.status)} ${th.fg("text", run.spec.name)} ${th.fg("dim", `· ${run.agents.length} agents · ${stats(run)}`)}`);
 				if (i === this.runIndex) lines.push(`     ${th.fg("muted", run.spec.why)}`);
 			}
@@ -112,6 +126,7 @@ export class WorkflowBrowser {
 			for (let i = 0; i < phases.length; i++) {
 				const agents = run.agents.filter((agent) => agent.phase === phases[i]);
 				const done = agents.filter((agent) => !["queued", "running"].includes(agent.status)).length;
+				if (i === this.phaseIndex) focusLine = lines.length;
 				lines.push(` ${i === this.phaseIndex ? th.fg("accent", ">") : " "} ${th.fg("accent", phases[i])} ${th.fg("dim", `· ${done}/${agents.length}`)}`);
 			}
 			lines.push("", `  ${th.fg("dim", stats(run))}`);
@@ -123,6 +138,7 @@ export class WorkflowBrowser {
 			lines.push(`  ${th.bold(run.spec.name)} ${th.fg("dim", "›")} ${th.fg("accent", phase)}`, "");
 			for (let i = 0; i < agents.length; i++) {
 				const agent = agents[i];
+				if (i === this.agentIndex) focusLine = lines.length;
 				lines.push(` ${i === this.agentIndex ? th.fg("accent", ">") : " "} ${icon(agent.status)} ${agent.label} ${th.fg("dim", `· ${agent.resolvedModel ?? agent.requestedModel ?? "auto"} · ${agent.usage.turns} turns · $${agent.usage.cost.toFixed(4)}`)}`);
 				if (agent.error) lines.push(`     ${th.fg("error", agent.error)}`);
 			}
@@ -136,12 +152,20 @@ export class WorkflowBrowser {
 			for (const tool of agent.toolCalls) detail.push(`${tool.error ? th.fg("error", "✗") : "→"} ${tool.name} ${th.fg("dim", JSON.stringify(tool.args ?? {}).slice(0, 300))}`);
 			detail.push("", th.fg("accent", agent.error ? "Error" : "Result"));
 			detail.push(...wrapTextWithAnsi(agent.error ? th.fg("error", agent.error) : agent.output ?? th.fg("dim", "(running)") , Math.max(10, width - 4)));
-			const window = detail.slice(this.scroll, this.scroll + 35);
+			const windowSize = Math.max(4, this.height - 13);
+			this.detailMaxScroll = Math.max(0, detail.length - windowSize);
+			this.scroll = Math.max(0, Math.min(this.detailMaxScroll, this.scroll));
+			const window = detail.slice(this.scroll, this.scroll + windowSize);
 			lines.push(...window.map((line) => `  ${line}`));
-			if (detail.length > 35) lines.push(`  ${th.fg("dim", `j/k scroll · ${this.scroll + 1}-${Math.min(detail.length, this.scroll + 35)}/${detail.length}`)}`);
+			if (detail.length > windowSize) lines.push(`  ${th.fg("dim", `j/k, pgup/pgdn, or wheel · ${this.scroll + 1}-${Math.min(detail.length, this.scroll + windowSize)}/${detail.length}`)}`);
 		}
-		lines.push("", `  ${th.fg("dim", "enter/→ drill down · esc/← back · p pause/resume · x stop · r restart running agent")}`, "");
-		return lines.map((line) => truncateToWidth(line, width));
+		const footer = ["", `  ${th.fg("dim", "enter/→ drill down · esc/← back · p pause/resume · x stop · r restart agent")}`, ""];
+		const header = lines.slice(0, 3);
+		const body = lines.slice(3);
+		const available = Math.max(1, this.height - header.length - footer.length);
+		const relativeFocus = Math.max(0, focusLine - header.length);
+		const start = Math.max(0, Math.min(Math.max(0, body.length - available), relativeFocus - available + 1));
+		return [...header, ...body.slice(start, start + available), ...footer].map((line) => truncateToWidth(line, width));
 	}
 
 	invalidate(): void {}

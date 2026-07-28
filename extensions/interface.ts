@@ -8,6 +8,7 @@ import { renderFooter } from "../ui/interface/footer.ts";
 import { KeybindingBrowser } from "../ui/interface/keybindings.ts";
 import { PiPlusPlusKeybindingRegistry } from "../ui/interface/piplusplus-keybindings.ts";
 import { Surface } from "../ui/primitives/surface.ts";
+import { getPermissionService } from "./shared/permission-service.ts";
 import { getTelemetryService } from "./shared/telemetry-service.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
@@ -127,8 +128,9 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
 			const unsubscribeTelemetry = getTelemetryService()?.subscribe(() => tui.requestRender());
+			const unsubscribePermissions = getPermissionService()?.subscribe?.(() => tui.requestRender());
 			return {
-				dispose: () => { unsubscribeBranch(); unsubscribeTelemetry?.(); },
+				dispose: () => { unsubscribeBranch(); unsubscribeTelemetry?.(); unsubscribePermissions?.(); },
 				invalidate() {},
 				render(width: number): string[] {
 					let inputTokens = 0;
@@ -158,6 +160,7 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 						cost,
 						providerBalance: telemetry?.balance,
 						providerSavings: telemetry?.estimatedSavings,
+						permissionMode: getPermissionService()?.getMode(),
 						statuses: [...footerData.getExtensionStatuses().values()],
 					}, width, theme);
 				},

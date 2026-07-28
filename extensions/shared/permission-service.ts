@@ -5,6 +5,7 @@ export type GlobalPermissionMode = "manual" | "auto" | "read-only";
 export interface PermissionService {
 	getMode(): GlobalPermissionMode;
 	setMode(mode: GlobalPermissionMode): Promise<void>;
+	subscribe?(listener: () => void): () => void;
 	authorize(request: PermissionRequest, ctx?: ExtensionContext, options?: { forcePrompt?: boolean; reason?: string }): Promise<boolean>;
 }
 

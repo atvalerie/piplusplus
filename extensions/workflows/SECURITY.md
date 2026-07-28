@@ -15,10 +15,11 @@ Subagents are separate Pi processes. Their tool calls are not trusted merely bec
 - Worker stdout/NDJSON: 32 MiB maximum.
 - Worker stderr: 1 MiB retained.
 - Tool calls: 10,000 retained per worker.
-- Lifecycle log events: 100,000 per worker and per run; dropped counts remain explicit.
+- Lifecycle log events: 100,000 per worker and per run; raw JSON events: 50,000 per worker. Dropped counts remain explicit.
+- Failed worker attempts retry three times with bounded exponential backoff by default; cancellation wakes pending backoffs.
 - UTF-8 is decoded with `StringDecoder`, preserving characters split across chunks.
 - Cancellation terminates the worker process tree, then escalates after a grace period. Linux uses process groups; Windows uses `taskkill.exe /t /f`.
-- Run and artifact files use atomic replacement and default to 30-day retention.
+- Run and artifact files use atomic replacement and default to 30-day retention. Artifacts are continuously updated and contain prompts, model responses, reasoning content when emitted, tool arguments/results, and errors; protect them as sensitive session data.
 
 ## Limitations
 

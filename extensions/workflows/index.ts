@@ -3,13 +3,14 @@ import * as path from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, type Terminal } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { writeUnverifiedWorkflowArtifact } from "./artifact.ts";
+import { writeWorkflowArtifact } from "./artifact.ts";
 import { getPermissionService } from "../shared/permission-service.ts";
 import { modelCatalogText, serializeModels } from "./models.ts";
 import { explainPermission } from "./permissions.ts";
 import { createWorkflowController, validateWorkflowScript } from "./runtime.ts";
+import { Surface } from "../../ui/primitives/surface.ts";
 import { WorkflowBrowser } from "./tui.ts";
 import { aggregateUsage, type AgentState, type PermissionRequest, type ThinkingLevel, type WorkflowController, type WorkflowRun, type WorkflowSpec, zeroUsage } from "./types.ts";
 
@@ -29,6 +30,8 @@ const WorkflowSchema = Type.Object({
 	background: Type.Optional(Type.Boolean({ description: "Run without blocking the conversation; default true" })),
 	approval: Type.Optional(StringEnum(["prompt", "skip"] as const)),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 86_400_000, description: "Parent-enforced workflow wall-clock deadline" })),
+	maxRetries: Type.Optional(Type.Integer({ minimum: 0, maximum: 10, description: "Retries per failed subagent; default 3" })),
+	retryBaseMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 60_000, description: "Initial exponential retry delay; default 1000ms" })),
 });
 
 function formatTokens(value: number): string {
@@ -56,6 +59,8 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	const runs = new Map<string, WorkflowRun>();
 	const controllers = new Map<string, WorkflowController>();
 	const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	const artifactTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	const artifactQueues = new Map<string, Promise<void>>();
 	const stateDir = path.join(getAgentDir(), "workflows", "runs");
 	const artifactDir = path.join(getAgentDir(), "workflows", "artifacts");
 	let ctxNow: ExtensionContext | undefined;
@@ -83,6 +88,24 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		persistTimers.set(run.id, setTimeout(() => { persistTimers.delete(run.id); void persistNow(run); }, 150));
 	};
 
+	const writeArtifactNow = async (run: WorkflowRun) => {
+		const previous = artifactQueues.get(run.id) ?? Promise.resolve();
+		const next = previous.catch(() => {}).then(async () => { await writeWorkflowArtifact(run, artifactDir); });
+		artifactQueues.set(run.id, next);
+		try { await next; }
+		catch (error) {
+			run.logs.push({ at: Date.now(), event: `artifact_error:${error instanceof Error ? error.message : String(error)}`, phase: run.currentPhase, status: run.status });
+			notify(`Could not update workflow JSON for ${run.spec.name}`, "warning");
+		} finally { if (artifactQueues.get(run.id) === next) artifactQueues.delete(run.id); }
+	};
+
+	const scheduleArtifact = (run: WorkflowRun, immediate = false) => {
+		const previous = artifactTimers.get(run.id);
+		if (previous) clearTimeout(previous);
+		if (immediate) { artifactTimers.delete(run.id); void writeArtifactNow(run); return; }
+		artifactTimers.set(run.id, setTimeout(() => { artifactTimers.delete(run.id); void writeArtifactNow(run); }, 150));
+	};
+
 	const refreshUi = () => {
 		const ctx = ctxNow;
 		if (!ctx?.hasUI) return;
@@ -99,7 +122,9 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		if (run.logs.length < MAX_RUN_LOG_EVENTS) run.logs.push({ at: Date.now(), event, phase: run.currentPhase, status: run.status, agentId: agent?.id, agentStatus: agent?.status });
 		else run.droppedLogEvents = (run.droppedLogEvents ?? 0) + 1;
 		run.usage = aggregateUsage(run.agents);
-		schedulePersist(run, ["completed", "completed_with_flags", "failed", "stopped"].includes(run.status));
+		const terminal = ["completed", "completed_with_flags", "failed", "stopped"].includes(run.status);
+		schedulePersist(run, terminal);
+		scheduleArtifact(run, terminal);
 		refreshUi();
 		pi.events.emit("piplusplus:workflow", { runId: run.id, event, status: run.status });
 	};
@@ -183,10 +208,12 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			spec = approved;
 			await ctx.modelRegistry.refresh();
 			const models = ctx.modelRegistry.getAvailable() as Model[];
+			const runId = `wf_${Date.now().toString(36)}_${(++counter).toString(36)}`;
 			const run: WorkflowRun = {
-				id: `wf_${Date.now().toString(36)}_${(++counter).toString(36)}`,
+				id: runId,
 				sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, spec, status: "queued", createdAt: Date.now(),
 				currentPhase: "Starting", phases: [], agents: [], flags: [], usage: zeroUsage(), paused: false, logs: [],
+				artifactPath: path.join(artifactDir, `${runId}.json`),
 			};
 			runs.set(run.id, run);
 			const runtime = createWorkflowController(run, models, ctx.model, {
@@ -199,21 +226,19 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			});
 			controllers.set(run.id, runtime.controller);
 			changed(run, "created");
+			const initialArtifactTimer = artifactTimers.get(run.id);
+			if (initialArtifactTimer) clearTimeout(initialArtifactTimer);
+			artifactTimers.delete(run.id);
+			await writeArtifactNow(run);
 			const background = spec.background ?? true;
 			const promise = runtime.execute().then(async () => {
 				controllers.delete(run.id);
-				try {
-					const artifact = await writeUnverifiedWorkflowArtifact(run, artifactDir);
-					if (artifact) changed(run, "unverified_artifact_written");
-				} catch (error) {
-					run.logs.push({ at: Date.now(), event: `artifact_error:${error instanceof Error ? error.message : String(error)}`, phase: run.currentPhase, status: run.status });
-					notify(`Could not write workflow handoff artifact for ${run.spec.name}`, "warning");
-				}
+				await writeArtifactNow(run);
 				await persistNow(run);
 				const level = run.status === "failed" ? "error" : run.status === "completed_with_flags" ? "warning" : "info";
 				notify(`Workflow ${run.status.replaceAll("_", " ")}: ${run.spec.name} · ${summary(run)}`, level);
 				if (background) {
-					const handoff = run.artifactPath ? `\n\nNo executed verification section was detected. Before reporting this workflow to the user, read the complete handoff JSON with the read tool:\n${run.artifactPath}` : "";
+					const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting; it is the source of truth and remains available throughout execution:\n${run.artifactPath}` : "";
 					pi.sendMessage({
 						customType: "piplusplus-workflow-result",
 						content: `Workflow ${run.id} (${run.spec.name}) ${run.status}.\n\n${run.result ?? run.error ?? "No result"}\n\n${summary(run)}${run.flags.length ? `\nFlags:\n- ${run.flags.join("\n- ")}` : ""}${handoff}`,
@@ -224,13 +249,13 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			});
 			if (background) {
 				void promise;
-				return { content: [{ type: "text", text: `Started JavaScript workflow ${run.id}: ${run.spec.name}. Use /workflows to inspect phases, individual prompts, tools, models, errors, and results.` }], details: { runId: run.id, status: run.status } };
+				return { content: [{ type: "text", text: `Started JavaScript workflow ${run.id}: ${run.spec.name}. Use /workflows for live UI or read the continuously updated workflow JSON at any time:\n${run.artifactPath}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath } };
 			}
 			const abort = () => runtime.controller.stop();
 			signal?.addEventListener("abort", abort, { once: true });
 			await promise;
 			signal?.removeEventListener("abort", abort);
-			const handoff = run.artifactPath ? `\n\nNo executed verification section was detected. Read the complete workflow handoff JSON before reporting:\n${run.artifactPath}` : "";
+			const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting:\n${run.artifactPath}` : "";
 			return { content: [{ type: "text", text: `${run.result ?? run.error ?? "No result"}\n\n${run.status} · ${summary(run)}${handoff}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath, run } };
 		},
 		renderCall(args, theme) {
@@ -265,13 +290,20 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (ctx.mode !== "tui") { ctx.ui.notify(orderedRuns().map((run) => `${run.id} ${run.status} ${run.spec.name}`).join("\n") || "No workflows", "info"); return; }
-			await ctx.ui.custom<void>((tui, theme, _keys, done) => {
-				let timer: ReturnType<typeof setInterval>;
-				const close = () => { clearInterval(timer); done(); };
-				const browser = new WorkflowBrowser(orderedRuns, controllers, theme, close);
-				timer = setInterval(() => tui.requestRender(), 250);
-				return { render: (width) => browser.render(width), invalidate: () => browser.invalidate(), handleInput: (data) => { browser.handleInput(data); tui.requestRender(); } };
-			});
+			let mouseTerminal: Terminal | undefined;
+			try {
+				await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+					mouseTerminal = tui.terminal;
+					mouseTerminal.write("\x1b[?1000h\x1b[?1006h");
+					let timer: ReturnType<typeof setInterval>;
+					const close = () => { clearInterval(timer); done(); };
+					const height = Math.max(10, Math.floor(tui.terminal.rows * 0.86) - 8);
+					const browser = new WorkflowBrowser(orderedRuns, controllers, theme, close, height);
+					const panel = new Surface({ theme, body: browser, border: "frame", borderTone: "accent", padding: { top: 0, right: 1, bottom: 0, left: 1 }, background: "panel" });
+					timer = setInterval(() => tui.requestRender(), 250);
+					return { render: (width) => panel.render(width), invalidate: () => panel.invalidate(), handleInput: (data) => { browser.handleInput(data); tui.requestRender(); } };
+				}, { overlay: true, overlayOptions: { width: "86%", maxHeight: "86%", anchor: "center", margin: 1 } });
+			} finally { mouseTerminal?.write("\x1b[?1006l\x1b[?1000l"); }
 		},
 	});
 
@@ -296,7 +328,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			"workflow_run executes a JavaScript orchestration body outside the main context. Each agent(prompt, options) starts an isolated Pi subagent with that distinct prompt. The script—not the main model—holds intermediate values, loops, branches, fan-out, and synthesis.",
 			ultracodeTriggered ? "The user's prompt contains the bounded trigger word `ultracode`. This is a one-prompt opt-in: use xhigh-level deliberation and generate a dynamic workflow for this task." : "Use workflows only when explicitly requested or materially useful; avoid them for small linear tasks.",
 			"Before model assignment, use workflow_models or this authenticated catalog. User choices win; otherwise choose each subagent model at your own discretion and set modelRationale. Do not rely blindly on auto routing.",
-			"A completed workflow without an executed verification worker produces a consolidated handoff JSON path in its result message. Read that file with the read tool before explaining the workflow to the user; it is the source of truth for the plan, script, prompts, every worker output, tools, logs, usage, errors, flags, and summary.",
+			"Every workflow immediately creates a continuously updated JSON artifact whose path is returned by workflow_run. Use the read tool to inspect it at any time and always read it before reporting; read access is permitted by the global policy even though the artifact is outside the project. It is the source of truth for the script, live status, retries, prompts, outputs, tools, logs, usage, errors, verification, flags, and summary.",
 			"Workflow tool permissions are separate from script approval and inherit the global /permissions mode. Manual explains and confirms writes, edits, commands, and unknown custom tools; auto only permits operations proven low-risk; read-only blocks mutations. Confirmation-required operations fail closed without a UI.",
 			"Available primitives: phase(name); await agent(uniquePrompt, {id,label,kind,model,modelRationale,thinking,tools}); await parallel([() => agent(...), ...]); await pipeline(items, async item => agent(...)); models(); workflowPrompt; ordinary deterministic JavaScript; return finalResult. Maximum 16 concurrent and 1000 total agents.",
 			"Example shape: phase('Research'); const findings = await parallel(targets.map(t => () => agent(`Research ${t}`, {kind:'research', model:'provider/fast'}))); phase('Verify'); const checked = await parallel(findings.map((f,i) => () => agent(`Adversarially verify finding ${i}: ${f}`, {kind:'verification', model:'provider/strong'}))); phase('Synthesize'); return await agent(`Synthesize verified results: ${JSON.stringify(checked)}`, {kind:'synthesis', model:'provider/strong'});",
@@ -333,18 +365,22 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 					if (run.sessionId !== ctx.sessionManager.getSessionId()) continue;
 					if (["queued", "running", "paused"].includes(run.status)) { run.status = "stopped"; run.finishedAt = Date.now(); run.error = "Interrupted by session restart or reload"; }
 					run.logs ??= [];
-					for (const agent of run.agents) agent.logs ??= [];
+					for (const agent of run.agents) { agent.logs ??= []; agent.messages ??= []; agent.events ??= []; }
 					runs.set(run.id, run);
 				} catch { /* ignore malformed old state */ }
 			}
 		} catch { /* best effort */ }
+		for (const run of runs.values()) scheduleArtifact(run, true);
 		refreshUi();
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", async () => {
 		for (const controller of controllers.values()) controller.stop();
 		for (const timer of persistTimers.values()) clearTimeout(timer);
+		for (const timer of artifactTimers.values()) clearTimeout(timer);
 		persistTimers.clear();
+		artifactTimers.clear();
+		await Promise.all([...runs.values()].map(async (run) => { await Promise.all([persistNow(run), writeArtifactNow(run)]); }));
 		ctxNow = undefined;
 	});
 }
