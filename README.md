@@ -44,7 +44,9 @@ After the agent produces a scoped numbered plan, the approval dialog offers the 
 
 Runs Claude Code-style dynamic workflows as deterministic JavaScript orchestration scripts. Orchestration executes in a QuickJS WebAssembly capability sandbox with no real Node process, filesystem, network, module, or host-realm access; only the documented workflow primitives cross the boundary. The sandbox has a 64 MiB memory limit, 2 MiB stack limit, and a parent-enforced wall-clock deadline (`timeoutMs`, 30 minutes by default). The script uses `agent()`, `parallel()`, `pipeline()`, and `phase()` to manage up to 1,000 isolated subagents, with at most 16 running concurrently. Every `agent()` call has its own prompt and may select its own model, thinking level, and tool set. Intermediate results remain in script variables; only the returned result enters the main conversation.
 
-Model choices come from Pi's live authenticated model catalog, available to the planning agent through `workflow_models` and to scripts through `models()`. Explicit user choices take precedence; otherwise the planning agent can select any model independently for every subagent, record its rationale, or delegate a choice to `auto`.
+Model choices come from Pi's live authenticated model catalog, available through `workflow_models` and `models()`. The orchestrating model may write its entire script and choose every worker model independently; recipes, profiles, and `auto` routing are optional. Explicit GPT/OpenAI or Claude/Anthropic requests become runtime family constraints, so unavailable requested families fail clearly instead of falling back to another family. Neutral `auto` routing no longer contains Opus/GPT brand preference; research favors cost-efficient capability while stronger phases use capability metadata.
+
+While a workflow is active, pressing Down from the editor's last line moves focus into a bottom-docked workflow manager without losing the prompt buffer. Up from the first workflow row (or Escape) returns to editing. `/workflows` opens the same bottom dock explicitly; other inspectors remain centered.
 
 Useful commands:
 

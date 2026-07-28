@@ -7,7 +7,8 @@ import { Text, type Terminal } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { writeWorkflowArtifact } from "./artifact.ts";
 import { getPermissionService } from "../shared/permission-service.ts";
-import { modelCatalogText, serializeModels } from "./models.ts";
+import { installWorkflowDockService, removeWorkflowDockService, type WorkflowDockService } from "../shared/workflow-dock-service.ts";
+import { inferModelFamilyInstruction, modelCatalogText, serializeModels } from "./models.ts";
 import { explainPermission, isPathWithinWriteScope } from "./permissions.ts";
 import { PROFILE_NAMES } from "./profiles.ts";
 import { compileWorkflowRecipe, WORKFLOW_RECIPE_NAMES } from "./recipes.ts";
@@ -28,6 +29,7 @@ const WorkflowSchema = Type.Object({
 	prompt: Type.String({ description: "The original task or workflow-level objective. Individual agent() calls still receive their own distinct prompts." }),
 	script: Type.Optional(Type.String({ description: "Deterministic JavaScript body using agent(), parallel(), pipeline(), phase(), approve(), models(), workflowPrompt, and return. Omit when using recipe." })),
 	recipe: Type.Optional(StringEnum(WORKFLOW_RECIPE_NAMES)),
+	modelFamily: Type.Optional(StringEnum(["gpt", "openai", "claude"] as const)),
 	userModelInstruction: Type.Optional(Type.String({ description: "Verbatim model preference stated by the user, if any" })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
 	background: Type.Optional(Type.Boolean({ description: "Run without blocking the conversation; default true" })),
@@ -72,6 +74,26 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	let counter = 0;
 
 	const orderedRuns = () => [...runs.values()].sort((a, b) => b.createdAt - a.createdAt);
+
+	const openWorkflowDock = async (ctx: ExtensionContext) => {
+		if (ctx.mode !== "tui") { ctx.ui.notify(orderedRuns().map((run) => `${run.id} ${run.status} ${run.spec.name}`).join("\n") || "No workflows", "info"); return; }
+		let mouseTerminal: Terminal | undefined;
+		try {
+			await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+				mouseTerminal = tui.terminal;
+				mouseTerminal.write("\x1b[?1000h\x1b[?1006h");
+				let timer: ReturnType<typeof setInterval>;
+				const close = () => { clearInterval(timer); done(); };
+				const height = Math.max(9, Math.floor(tui.terminal.rows * 0.45) - 2);
+				const browser = new WorkflowBrowser(orderedRuns, controllers, theme, close, height);
+				const panel = new Surface({ theme, body: browser, border: "frame", borderTone: "accent", padding: { top: 0, right: 1, bottom: 0, left: 1 }, background: "panel" });
+				timer = setInterval(() => tui.requestRender(), 250);
+				return { render: (width) => panel.render(width), invalidate: () => panel.invalidate(), handleInput: (data) => { browser.handleInput(data); tui.requestRender(); } };
+			}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "48%", anchor: "bottom-center", margin: { top: 0, right: 0, bottom: 0, left: 0 } } });
+		} finally { mouseTerminal?.write("\x1b[?1006l\x1b[?1000l"); }
+	};
+	const dockService: WorkflowDockService = { hasRuns: () => [...runs.values()].some((run) => ["queued", "running", "paused"].includes(run.status)), open: openWorkflowDock };
+	installWorkflowDockService(dockService);
 
 	const persistNow = async (run: WorkflowRun) => {
 		try {
@@ -198,7 +220,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		description: "Compile and run a deterministic JavaScript orchestration script in the background. The script can create up to 1000 isolated subagents with manual, conservative auto, or read-only tool permissions, and manage up to 16 concurrently. Intermediate results stay in script variables; only the returned value is delivered to the main conversation.",
 		promptSnippet: "Run JavaScript-orchestrated background workflows with many independently prompted and model-routed subagents",
 		promptGuidelines: [
-			"Prefer audited recipes for standard work: diagnose, design, review, or implement. Generate custom JavaScript only when the requested control flow cannot be represented by a recipe.",
+			"Recipes (diagnose, design, review, implement) are optional conveniences, not mandatory templates. Freely write a custom JavaScript workflow whenever it better matches the task, routing, or model strategy.",
 			"Use workflow_run only when fan-out, context isolation, loops, branching, or independent verification materially improves the task.",
 			"Call workflow_models before workflow_run when selecting worker models. Explicit user model choices are binding; otherwise choose models at your own discretion from the returned authenticated catalog.",
 			`Reusable profiles: ${PROFILE_NAMES.join(", ")}. Prefer profiles over ad-hoc role prose; their structured JSON contracts are validated and invalid output is retried.`,
@@ -218,6 +240,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				if (!requested.script?.trim()) throw new Error("workflow_run requires either recipe or script");
 				spec = requested as WorkflowSpec;
 			}
+			spec.modelFamily ??= inferModelFamilyInstruction(spec.userModelInstruction, spec.prompt, spec.goal);
 			const compileError = validateWorkflowScript(spec.script);
 			if (compileError) throw new Error(`Invalid workflow JavaScript: ${compileError}`);
 			const approved = await approve(spec, ctx);
@@ -312,21 +335,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(run ? `${icon(run.status)} ${run.spec.name} · ${run.status} · ${summary(run)}` : `Unknown workflow: ${id}`, run?.status === "failed" ? "error" : "info");
 				return;
 			}
-			if (ctx.mode !== "tui") { ctx.ui.notify(orderedRuns().map((run) => `${run.id} ${run.status} ${run.spec.name}`).join("\n") || "No workflows", "info"); return; }
-			let mouseTerminal: Terminal | undefined;
-			try {
-				await ctx.ui.custom<void>((tui, theme, _keys, done) => {
-					mouseTerminal = tui.terminal;
-					mouseTerminal.write("\x1b[?1000h\x1b[?1006h");
-					let timer: ReturnType<typeof setInterval>;
-					const close = () => { clearInterval(timer); done(); };
-					const height = Math.max(10, Math.floor(tui.terminal.rows * 0.86) - 8);
-					const browser = new WorkflowBrowser(orderedRuns, controllers, theme, close, height);
-					const panel = new Surface({ theme, body: browser, border: "frame", borderTone: "accent", padding: { top: 0, right: 1, bottom: 0, left: 1 }, background: "panel" });
-					timer = setInterval(() => tui.requestRender(), 250);
-					return { render: (width) => panel.render(width), invalidate: () => panel.invalidate(), handleInput: (data) => { browser.handleInput(data); tui.requestRender(); } };
-				}, { overlay: true, overlayOptions: { width: "86%", maxHeight: "86%", anchor: "center", margin: 1 } });
-			} finally { mouseTerminal?.write("\x1b[?1006l\x1b[?1000l"); }
+			await openWorkflowDock(ctx);
 		},
 	});
 
@@ -348,9 +357,9 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		}
 		const instructions = [
 			"# Dynamic JavaScript workflows",
-			"workflow_run runs either an audited named recipe or a custom JavaScript orchestration body outside the main context. Each agent(prompt, options) starts an isolated Pi subagent with a distinct assignment. Prefer recipe:'diagnose'|'design'|'review'|'implement' for standard work; generate JavaScript only for genuinely custom control flow.",
+			"workflow_run runs either an optional named recipe or a fully custom JavaScript orchestration body outside the main context. Each agent(prompt, options) starts an isolated Pi subagent with a distinct assignment. You are free to write the entire script, choose every model independently, mix profiles with ad-hoc prompts, or omit profiles; recipes and profiles are never compulsory.",
 			ultracodeTriggered ? "The user's prompt contains the bounded trigger word `ultracode`. This is a one-prompt opt-in: use xhigh-level deliberation and generate a dynamic workflow for this task." : "Use workflows only when explicitly requested or materially useful; avoid them for small linear tasks.",
-			"Before model assignment, use workflow_models or this authenticated catalog. User choices win; otherwise choose each subagent model at your own discretion and set modelRationale. Do not rely blindly on auto routing.",
+			"Before model assignment, inspect workflow_models or this authenticated catalog and choose from models actually available. User choices win. If the user requests GPT, OpenAI, Claude, or Anthropic workers, set modelFamily; the runtime enforces that explicit constraint and never falls back across families. Without an explicit family constraint, choose any model per worker and set modelRationale; model:'auto' is only an optional neutral fallback, not a requirement.",
 			"Every workflow immediately creates a continuously updated JSON artifact whose path is returned by workflow_run. Use the read tool to inspect it at any time and always read it before reporting; read access is permitted by the global policy even though the artifact is outside the project. It is the source of truth for the script, live status, retries, prompts, outputs, tools, logs, usage, errors, verification, flags, and summary.",
 			"Workflow tool permissions are separate from script approval and inherit the global /permissions mode. Manual explains and confirms writes, edits, commands, and unknown custom tools; auto only permits operations proven low-risk; read-only blocks mutations. Confirmation-required operations fail closed without a UI.",
 			`Specialist profiles are ${PROFILE_NAMES.join(", ")}. Profiles add evidence-focused instructions and, except synthesizer, runtime-validated JSON status contracts; malformed output retries automatically. Use writePaths on mutating workers to enforce direct write/edit scope.`,
@@ -407,5 +416,6 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		artifactTimers.clear();
 		await Promise.all([...runs.values()].map(async (run) => { await Promise.all([persistNow(run), writeArtifactNow(run)]); }));
 		ctxNow = undefined;
+		removeWorkflowDockService(dockService);
 	});
 }

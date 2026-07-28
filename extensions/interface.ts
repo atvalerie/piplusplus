@@ -10,6 +10,7 @@ import { PiPlusPlusKeybindingRegistry } from "../ui/interface/piplusplus-keybind
 import { Surface } from "../ui/primitives/surface.ts";
 import { getPermissionService } from "./shared/permission-service.ts";
 import { getTelemetryService } from "./shared/telemetry-service.ts";
+import { getWorkflowDockService } from "./shared/workflow-dock-service.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 
@@ -131,6 +132,12 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 				if (registry.matches(data, "piplusplus.keybindings.open")) { void showKeybindings(ctx); return true; }
 				if (registry.matches(data, "piplusplus.effort.open")) { void showEffort(ctx); return true; }
 				return false;
+			};
+			editor.onEnterBottomDock = () => {
+				const dock = getWorkflowDockService();
+				if (!dock?.hasRuns()) return false;
+				void dock.open(ctx);
+				return true;
 			};
 			return editor;
 		});

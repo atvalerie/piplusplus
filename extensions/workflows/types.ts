@@ -2,6 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import type { Message } from "@earendil-works/pi-ai";
 
 export type StepKind = "research" | "discovery" | "planning" | "implementation" | "review" | "verification" | "synthesis" | "general";
+export type ModelFamilyPolicy = "gpt" | "openai" | "claude";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type RunStatus = "queued" | "running" | "paused" | "completed" | "completed_with_flags" | "failed" | "stopped";
 export type AgentStatus = "queued" | "running" | "completed" | "flagged" | "failed" | "stopped";
@@ -108,6 +109,7 @@ export interface WorkflowSpec {
 	prompt: string;
 	script: string;
 	recipe?: string;
+	modelFamily?: ModelFamilyPolicy;
 	userModelInstruction?: string;
 	concurrency?: number;
 	background?: boolean;

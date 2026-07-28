@@ -87,6 +87,7 @@ export class WorkflowBrowser {
 		}
 		const max = this.level === "runs" ? this.getRuns().length : this.level === "phases" ? this.phases().length : this.agents().length;
 		if (matchesKey(data, Key.up)) {
+			if (this.level === "runs" && this.runIndex === 0) { this.close(); return; }
 			if (this.level === "runs") this.runIndex = Math.max(0, this.runIndex - 1);
 			else if (this.level === "phases") this.phaseIndex = Math.max(0, this.phaseIndex - 1);
 			else this.agentIndex = Math.max(0, this.agentIndex - 1);
@@ -160,7 +161,7 @@ export class WorkflowBrowser {
 			lines.push(...window.map((line) => `  ${line}`));
 			if (detail.length > windowSize) lines.push(`  ${th.fg("dim", `j/k, pgup/pgdn, or wheel · ${this.scroll + 1}-${Math.min(detail.length, this.scroll + windowSize)}/${detail.length}`)}`);
 		}
-		const footer = ["", `  ${th.fg("dim", "enter/→ drill down · esc/← back · p pause/resume · x stop · r restart agent")}`, ""];
+		const footer = ["", `  ${th.fg("dim", "↑ at first run returns to prompt · enter/→ details · esc/← back · p pause · x stop · r restart")}`, ""];
 		const header = lines.slice(0, 3);
 		const body = lines.slice(3);
 		const available = Math.max(1, this.height - header.length - footer.length);

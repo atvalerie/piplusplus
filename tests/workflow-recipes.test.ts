@@ -4,7 +4,19 @@ import { isPathWithinWriteScope } from "../extensions/workflows/permissions.ts";
 import { applyWorkflowProfile, validateProfileOutput, WORKFLOW_PROFILES } from "../extensions/workflows/profiles.ts";
 import { compileWorkflowRecipe, WORKFLOW_RECIPE_NAMES } from "../extensions/workflows/recipes.ts";
 import { validateWorkflowScript } from "../extensions/workflows/runtime.ts";
+import { chooseAutoModel, inferModelFamilyInstruction, modelMatchesFamily } from "../extensions/workflows/models.ts";
 import { executeSandboxedWorkflow } from "../extensions/workflows/sandbox.ts";
+
+test("explicit model-family instructions are detected and enforced without cross-family fallback", () => {
+	assert.equal(inferModelFamilyInstruction("No matter what, pick GPT models for all workers"), "gpt");
+	assert.equal(inferModelFamilyInstruction("Use only Anthropic models"), "claude");
+	assert.equal(inferModelFamilyInstruction("Compare GPT and Claude models"), undefined);
+	assert.equal(modelMatchesFamily({ provider: "modelhub", id: "gpt-5.4", name: "GPT 5.4" }, "gpt"), true);
+	assert.equal(modelMatchesFamily({ provider: "modelhub", id: "claude-sonnet-4-6", name: "Claude Sonnet" }, "gpt"), false);
+	const cheap = { provider: "modelhub", id: "gpt-5-mini", name: "GPT Mini", contextWindow: 128_000, maxTokens: 16_000, reasoning: true, cost: { input: 0.2, output: 1 } } as any;
+	const opus = { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus", contextWindow: 200_000, maxTokens: 32_000, reasoning: true, cost: { input: 15, output: 75 } } as any;
+	assert.equal(chooseAutoModel([opus, cheap], "research"), cheap);
+});
 
 test("built-in workflow recipes compile as sandbox programs", () => {
 	for (const name of WORKFLOW_RECIPE_NAMES) {

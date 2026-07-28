@@ -1,7 +1,7 @@
 import vm from "node:vm";
 import type { Model } from "@earendil-works/pi-ai";
 import { runChildAgent } from "./child.ts";
-import { resolveModel, serializeModels } from "./models.ts";
+import { modelMatchesFamily, resolveModel, serializeModels } from "./models.ts";
 import { terminateProcessTree } from "./processes.ts";
 import { applyWorkflowProfile, validateProfileOutput } from "./profiles.ts";
 import { executeSandboxedWorkflow } from "./sandbox.ts";
@@ -81,6 +81,8 @@ export function createWorkflowController(
 	mainModel: Model | undefined,
 	callbacks: RuntimeCallbacks,
 ): { controller: WorkflowController; execute: () => Promise<void> } {
+	const eligibleModels = run.spec.modelFamily ? models.filter((model) => modelMatchesFamily(model, run.spec.modelFamily!)) : models;
+	const eligibleMainModel = mainModel && (!run.spec.modelFamily || modelMatchesFamily(mainModel, run.spec.modelFamily)) ? mainModel : undefined;
 	const scheduler = new Scheduler(Math.max(1, Math.min(run.spec.concurrency ?? 4, MAX_CONCURRENCY)));
 	let phase = "Workflow";
 	let sequence = 0;
@@ -183,15 +185,25 @@ export function createWorkflowController(
 			attempt: 0,
 		};
 		run.agents.push(agent);
+		let requestedModel = options.model;
+		if (run.spec.modelFamily && requestedModel && requestedModel !== "auto") {
+			const requestedCandidate = resolveModel(models, requestedModel, kind, mainModel);
+			if ((requestedCandidate && !modelMatchesFamily(requestedCandidate, run.spec.modelFamily)) || (!requestedCandidate && !modelMatchesFamily({ provider: "", id: requestedModel, name: requestedModel }, run.spec.modelFamily))) {
+				agent.logs.push({ at: Date.now(), type: "model_policy_override", message: `${requestedModel} conflicts with required ${run.spec.modelFamily} family; selecting within policy` });
+				requestedModel = undefined;
+			}
+		}
 		if (!run.phases.includes(requestedPhase)) run.phases.push(requestedPhase);
 		update("agent_queued", agent);
 		if (!await scheduler.acquire()) { agent.status = "stopped"; return null; }
 		try {
 			while (!stopped && !agent.stopRequested) {
-				const model = resolveModel(models, options.model, kind, mainModel);
+				const model = resolveModel(eligibleModels, requestedModel, kind, eligibleMainModel);
 				if (!model) {
 					agent.status = "failed";
-					agent.error = options.model ? `Requested model is unavailable: ${options.model}` : "No authenticated model is available";
+					agent.error = run.spec.modelFamily
+						? `No authenticated ${run.spec.modelFamily} model is available; cross-family fallback is forbidden`
+						: options.model ? `Requested model is unavailable: ${options.model}` : "No authenticated model is available";
 					agent.finishedAt = Date.now();
 					callbacks.notify(`${run.spec.name} / ${agent.label}: ${agent.error}`, "error");
 					update("agent_failed", agent);

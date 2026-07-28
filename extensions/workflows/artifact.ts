@@ -26,7 +26,7 @@ export async function writeWorkflowArtifact(run: WorkflowRun, directory: string)
 		kind: "piplusplus.workflow.state",
 		reason: "Continuously updated workflow source of truth for live inspection and final handoff.",
 		workflow: {
-			id: run.id, name: run.spec.name, recipe: run.spec.recipe, why: run.spec.why, goal: run.spec.goal, prompt: run.spec.prompt,
+			id: run.id, name: run.spec.name, recipe: run.spec.recipe, modelFamily: run.spec.modelFamily, why: run.spec.why, goal: run.spec.goal, prompt: run.spec.prompt,
 			userModelInstruction: run.spec.userModelInstruction, script: run.spec.script, concurrency: run.spec.concurrency ?? 4,
 			timeoutMs: run.spec.timeoutMs ?? 30 * 60_000, maxRetries: run.spec.maxRetries ?? 3, retryBaseMs: run.spec.retryBaseMs ?? 1_000,
 			cwd: run.cwd, sessionId: run.sessionId,

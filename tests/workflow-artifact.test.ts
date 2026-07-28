@@ -42,6 +42,10 @@ test("workflow browser uses a bounded, selection-following viewport", () => {
 	const lines = browser.render(80);
 	assert.equal(lines.length, 12);
 	assert.match(lines.join("\n"), /Audit 15/);
+	let closed = false;
+	const dock = new WorkflowBrowser(() => runs.slice(0, 1), new Map(), theme, () => { closed = true; }, 12);
+	dock.handleInput("\x1b[A");
+	assert.equal(closed, true);
 });
 
 test("unverified workflows produce one consolidated parent-agent handoff", async () => {
