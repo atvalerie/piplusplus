@@ -9,6 +9,7 @@ export type SavedWorkflowScope = "project" | "personal";
 export interface SavedWorkflowMeta {
 	name: string;
 	description: string;
+	phases?: Array<{ title: string; detail?: string }>;
 }
 
 export interface SavedWorkflow {
@@ -79,11 +80,32 @@ export async function parseSavedWorkflowSource(source: string): Promise<{ meta: 
 	const value = await evaluateSandboxedJSONExpression(declaration.expression);
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Saved workflow meta must evaluate to a JSON object.");
 	const record = value as Record<string, unknown>;
-	const extra = Object.keys(record).filter((key) => !["name", "description"].includes(key));
+	const extra = Object.keys(record).filter((key) => !["name", "description", "phases"].includes(key));
 	if (extra.length) throw new Error(`Unknown saved workflow meta properties: ${extra.join(", ")}`);
+	let phases: SavedWorkflowMeta["phases"];
+	if (record.phases !== undefined) {
+		if (!Array.isArray(record.phases) || record.phases.length > 100) throw new Error("Saved workflow meta.phases must be an array with at most 100 entries.");
+		phases = record.phases.map((item, index) => {
+			if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`Saved workflow meta.phases[${index}] must be an object.`);
+			const phase = item as Record<string, unknown>;
+			const phaseExtra = Object.keys(phase).filter((key) => !["title", "detail"].includes(key));
+			if (phaseExtra.length) throw new Error(`Unknown saved workflow meta.phases[${index}] properties: ${phaseExtra.join(", ")}`);
+			if (typeof phase.title !== "string" || !phase.title.trim() || phase.title.trim().length > 100) {
+				throw new Error(`Saved workflow meta.phases[${index}].title must contain 1-100 characters.`);
+			}
+			if (phase.detail !== undefined && (typeof phase.detail !== "string" || !phase.detail.trim() || phase.detail.trim().length > 500)) {
+				throw new Error(`Saved workflow meta.phases[${index}].detail must contain 1-500 characters when present.`);
+			}
+			return {
+				title: phase.title.trim(),
+				...(phase.detail === undefined ? {} : { detail: phase.detail.trim() }),
+			};
+		});
+	}
 	const meta = {
 		name: validateSavedWorkflowName(record.name),
 		description: typeof record.description === "string" ? record.description.trim() : "",
+		...(phases === undefined ? {} : { phases }),
 	};
 	if (!meta.description || meta.description.length > 500) throw new Error("Saved workflow description must contain 1-500 characters.");
 	const script = `${source.slice(0, declaration.start)}${source.slice(declaration.end)}`.trim();

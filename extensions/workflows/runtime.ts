@@ -264,6 +264,14 @@ export function createWorkflowController(
 	const runAgent = async (prompt: unknown, options: AgentOptions = {}, requestedPhase = phase): Promise<unknown> => {
 		if (stopped) return null;
 		if (typeof prompt !== "string" || !prompt.trim()) throw new Error("agent() requires a non-empty prompt string");
+		if (options.phase !== undefined) {
+			if (typeof options.phase !== "string" || !options.phase.trim()) throw new Error("agent phase must be a non-empty string");
+			requestedPhase = options.phase.trim();
+		}
+		const thinking = options.thinking ?? options.effort;
+		if (thinking !== undefined && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking)) {
+			throw new Error("agent thinking/effort must be off, minimal, low, medium, high, xhigh, or max");
+		}
 		const id = options.id ?? `agent_${++sequence}`;
 		if (run.agents.some((agent) => agent.id === id)) throw new Error(`Duplicate agent id: ${id}`);
 		const maxTurns = options.maxTurns === undefined
@@ -308,7 +316,7 @@ export function createWorkflowController(
 			requestedModel,
 			resolvedModel: model ? `${model.provider}/${model.id}` : undefined,
 			modelRationale: options.modelRationale,
-			thinking: options.thinking,
+			thinking,
 			tools,
 			profile: profile?.name,
 			writePaths,
@@ -336,7 +344,7 @@ export function createWorkflowController(
 				requestedModel,
 				resolvedModel: model ? `${model.provider}/${model.id}` : prior.resolvedModel,
 				modelRationale: options.modelRationale,
-				thinking: options.thinking,
+				thinking,
 				tools,
 				profile: profile?.name,
 				writePaths,
@@ -366,7 +374,7 @@ export function createWorkflowController(
 			kind,
 			requestedModel: options.model,
 			modelRationale: options.modelRationale,
-			thinking: options.thinking,
+			thinking,
 			tools,
 			profile: profile?.name,
 			writePaths,

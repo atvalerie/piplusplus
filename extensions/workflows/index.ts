@@ -16,7 +16,17 @@ import { PROFILE_NAMES } from "./profiles.ts";
 import { compileWorkflowRecipe, WORKFLOW_RECIPE_NAMES } from "./recipes.ts";
 import { createWorkflowController, validateWorkflowScript } from "./runtime.ts";
 import { createSavedWorkflowSource, loadSavedWorkflows, normalizeWorkflowArgs, parseSavedWorkflowArgs, savedWorkflowDirectories, saveWorkflowSource, type SavedWorkflow } from "./saved.ts";
-import { DEFAULT_WORKFLOW_SETTINGS, isInteractiveUltracodeTrigger, loadWorkflowSettings, saveWorkflowSettings, type WorkflowSettings } from "./settings.ts";
+import {
+	applyWorkflowBudgetSettings,
+	DEFAULT_WORKFLOW_SETTINGS,
+	describeWorkflowBudgetSettings,
+	isInteractiveUltracodeTrigger,
+	loadWorkflowSettings,
+	normalizeCustomBudgets,
+	saveWorkflowSettings,
+	type WorkflowBudgetMode,
+	type WorkflowSettings,
+} from "./settings.ts";
 import { buildWorkflowSystemInstructions, workflowPolicyContext } from "./system-prompt.ts";
 import { Surface } from "../../ui/primitives/surface.ts";
 import { WorkflowBrowser } from "./tui.ts";
@@ -54,7 +64,7 @@ export const WorkflowSchema = Type.Object({
 		maxAgents: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000 })),
 		maxTokens: Type.Optional(Type.Integer({ minimum: 1, description: "Hard cap on consumed input, output, cache-read, and cache-write tokens." })),
 		maxCost: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "Hard cap on reported workflow cost." })),
-	}, { additionalProperties: false, description: "Hard workflow budgets. Exhaustion prevents new workers from starting while already-running workers may finish." })),
+	}, { additionalProperties: false, description: "Aggregate scheduling budgets. User settings override these fields. Exhaustion prevents new workers from starting; already-running workers may finish and overrun token/cost thresholds." })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
 	background: Type.Optional(Type.Boolean({ description: "Run without blocking the conversation; default true" })),
 	timeoutMs: Type.Optional(Type.Integer({ minimum: 1_000, maximum: 86_400_000, description: "Parent-enforced workflow wall-clock deadline" })),
@@ -431,7 +441,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 						background: true,
 						modelPolicy: { defaultRouting: "inherit", rationale: "Saved workflows use Claude-compatible session-model inheritance unless their script routes an agent explicitly." },
 					};
-					const approved = await approve(spec, commandContext);
+					const approved = await approve(applyWorkflowBudgetSettings(spec, workflowSettings), commandContext);
 					if (!approved) { commandContext.ui.notify(`Saved workflow /${name} canceled.`, "info"); return; }
 					const result = await launchApprovedWorkflow(approved, commandContext);
 					commandContext.ui.notify(result.content[0]?.text ?? `Started /${name}.`, "info");
@@ -475,8 +485,8 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			"Call workflow_models before choosing exact worker models or restricting a workflow to a family different from the session model. Under an allowlist, route exact eligible models or deliberately set defaultRouting='auto'; an ineligible inherited model fails closed.",
 			`Reusable profiles: ${PROFILE_NAMES.join(", ")}. Prefer profiles over ad-hoc role prose; their structured JSON contracts are validated and invalid output is retried.`,
 			"For ad-hoc structured workers, pass a JSON Schema as agent(..., { schema }). The runtime returns the parsed JSON value directly to JavaScript, validates nested values and additional properties, and retries invalid worker output. Without schema, agent() returns text.",
-			"Declare size as small (<5 agents), medium (<15), large (<50), or unrestricted, and set hard budgets when appropriate. budgets.maxAgents/maxTokens/maxCost stop new workers after exhaustion; already-running workers may finish and partial results remain available. Runs above 25 scheduled agents or 1.5M projected output tokens warn explicitly.",
-			"Use agent(..., { maxTurns }) to bound an individual worker. A worker that reaches the limit while requesting another tool is terminated by the parent event stream and is not retried.",
+			"Declare size as small (<5 agents), medium (<15), large (<50), or unrestricted. User-owned budget settings override budgets emitted here. Aggregate maxAgents/maxTokens/maxCost values stop new workers after exhaustion; already-running workers may finish and overrun token/cost thresholds. Use lower concurrency and per-agent maxTurns when a tighter bound is required. Runs above 25 scheduled agents or 1.5M projected output tokens warn explicitly.",
+			"Use agent(..., { maxTurns }) to bound an individual worker. A worker that reaches the limit while requesting another tool is terminated by the parent event stream and is not retried. Agent options accept thinking or the Claude Workflow-compatible effort alias, plus an optional per-agent phase override.",
 			"Every custom workflow_run script must give each subagent a task-specific prompt through agent(prompt, options). Do not use one generic shared worker prompt.",
 			"Use phase(name) for visible stages, parallel([() => agent(...), ...]) for fan-out, pipeline(items, stage...) for maps, ordinary JavaScript loops/branches for loop-until-done and classify-and-act, and a final agent critic/synthesizer before return when correctness matters.",
 			"Workflow workers inherit the global Pi++ permission service. Never treat workflow approval as permission to bypass global tool policy; if the permission extension is unavailable, workers fail closed to read-only behavior.",
@@ -498,6 +508,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				defaultRouting: "inherit",
 				rationale: "No explicit model policy was supplied; use Claude-compatible session-model inheritance.",
 			};
+			spec = applyWorkflowBudgetSettings(spec, workflowSettings);
 			const compileError = validateWorkflowScript(spec.script);
 			if (compileError) throw new Error(`Invalid workflow JavaScript: ${compileError}`);
 			const approved = await approve(spec, ctx);
@@ -528,7 +539,8 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("workflows", {
 		description: "Browse workflows, phases, subagent prompts, tools, models, errors, and results",
 		handler: async (args, ctx) => {
-			const [action, id, agentId] = args.trim().split(/\s+/, 3);
+			const parts = args.trim().split(/\s+/).filter(Boolean);
+			const [action, id, agentId] = parts;
 			if (action === "triggers") {
 				if (id !== "on" && id !== "off" && id !== "status") {
 					ctx.ui.notify("Usage: /workflows triggers on|off|status", "warning");
@@ -554,6 +566,62 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 					catch (error) { ctx.ui.notify(`Could not save ultracode effort setting: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
 				}
 				ctx.ui.notify(`Ultracode effort mode: ${workflowSettings.ultracodeEffortMode}.`, "info");
+				return;
+			}
+			if (action === "budget") {
+				let mode = id as WorkflowBudgetMode | "status" | "unlimited" | undefined;
+				if (!mode) {
+					const selected = await ctx.ui.select(`Workflow aggregate budgets: ${describeWorkflowBudgetSettings(workflowSettings)}`, [
+						"Off - no aggregate budget (Claude-compatible)",
+						"Custom - user-owned limits",
+						"Model - orchestrator chooses per run",
+						"Cancel",
+					]);
+					if (!selected || selected === "Cancel") return;
+					mode = selected.startsWith("Off") ? "off" : selected.startsWith("Custom") ? "custom" : "model";
+				}
+				if (mode === "status") {
+					ctx.ui.notify(`Workflow aggregate budgets: ${describeWorkflowBudgetSettings(workflowSettings)}.`, "info");
+					return;
+				}
+				if (mode === "unlimited") mode = "off";
+				if (mode !== "off" && mode !== "model" && mode !== "custom") {
+					ctx.ui.notify('Usage: /workflows budget off|model|custom [maxTokens or JSON]|status', "warning");
+					return;
+				}
+				let customBudgets = workflowSettings.customBudgets;
+				if (mode === "custom") {
+					const raw = parts.slice(2).join(" ").trim();
+					try {
+						if (raw) {
+							customBudgets = normalizeCustomBudgets(/^\d+$/.test(raw) ? { maxTokens: Number(raw) } : JSON.parse(raw));
+						} else {
+							const maxTokens = await ctx.ui.input("Workflow token scheduling threshold", "e.g. 200000; empty = no token threshold");
+							if (maxTokens === undefined) return;
+							const maxAgents = await ctx.ui.input("Maximum agents", "e.g. 3; empty = runtime ceiling");
+							if (maxAgents === undefined) return;
+							const maxCost = await ctx.ui.input("Cost scheduling threshold (USD)", "e.g. 5; empty = no cost threshold");
+							if (maxCost === undefined) return;
+							customBudgets = normalizeCustomBudgets({
+								...(maxTokens.trim() ? { maxTokens: Number(maxTokens) } : {}),
+								...(maxAgents.trim() ? { maxAgents: Number(maxAgents) } : {}),
+								...(maxCost.trim() ? { maxCost: Number(maxCost) } : {}),
+							});
+						}
+						if (!customBudgets) throw new Error("At least one custom limit is required; use budget off for no aggregate limits.");
+					} catch (error) {
+						ctx.ui.notify(`Invalid workflow budget: ${error instanceof Error ? error.message : String(error)}`, "error");
+						return;
+					}
+				}
+				workflowSettings = {
+					...workflowSettings,
+					budgetMode: mode,
+					...(mode === "custom" ? { customBudgets } : {}),
+				};
+				try { await saveWorkflowSettings(getAgentDir(), workflowSettings); }
+				catch (error) { ctx.ui.notify(`Could not save workflow budget setting: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
+				ctx.ui.notify(`Workflow aggregate budgets: ${describeWorkflowBudgetSettings(workflowSettings)}. Already-running parallel workers can overrun token/cost scheduling thresholds.`, "info");
 				return;
 			}
 			if (action === "stop" && id) { controllers.get(id)?.stop(); return; }
@@ -602,6 +670,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			models,
 			ultracodeTriggered,
 			ultracodeEffortMode: workflowSettings.ultracodeEffortMode,
+			budgetPolicy: describeWorkflowBudgetSettings(workflowSettings),
 		});
 		return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
 	});

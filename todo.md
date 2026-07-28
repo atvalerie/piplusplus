@@ -400,3 +400,14 @@ The global Pi 0.82.1 extension loader aliases only its documented extension entr
 - individual `@earendil-works/pi-ai/api/*.lazy` imports were replaced with the exact `@earendil-works/pi-ai/compat` entrypoint.
 
 Verification passed 105/105 tests, native entrypoint imports, `git diff --check`, and an actual global-loader smoke test using `pi -e ./ --no-extensions --no-skills --no-prompt-templates --offline --list-models` with exit code 0 and 24 loaded ModelHub models.
+
+## Workflow IPC, Claude-script compatibility, and user budgets — 2026-07-29
+
+- The permission-response pipe now absorbs expected `EPIPE`/closed-stream races when a worker exits while a permission decision is pending. Unexpected IPC failures are logged, and permission-handler exceptions fail closed instead of escaping as an unhandled rejection or hanging the worker.
+- Saved workflows accept bounded Claude-style `meta.phases`; agent options accept `effort` as an alias for `thinking` and an optional per-agent `phase`.
+- A regression test proves that a phase after `await parallel(...)` cannot start until every prior worker settles and that their structured results are available to the dependent agent.
+- Aggregate workflow budgets are now user-owned and default to `off`. Persistent modes are `off`, `custom`, and `model`; user settings override model-proposed budgets for direct, recipe, and saved workflows.
+- `/workflows budget` opens the editor. Direct forms are `/workflows budget off`, `/workflows budget model`, `/workflows budget custom 200000`, `/workflows budget custom {"maxTokens":200000,"maxAgents":3,"maxCost":5}`, and `/workflows budget status`.
+- `maxTokens` and `maxCost` are explicitly described as scheduling thresholds: they block new starts after reported exhaustion, while already-running parallel workers may overrun them. `maxTurns`, lower concurrency, and the workflow deadline provide tighter active-work bounds.
+
+Verification passed 111/111 tests, native entrypoint imports, `git diff --check`, parsing of the supplied Claude workflow file, and the global Pi loader smoke test `pi -ne -e ./ --no-skills --no-prompt-templates --offline --list-models` with exit code 0 and 24 ModelHub models.

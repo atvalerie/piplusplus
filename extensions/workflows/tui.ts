@@ -180,13 +180,17 @@ export class WorkflowBrowser {
 			}
 			lines.push("", `  ${th.fg("dim", stats(run))}`);
 			if (run.budget) {
+				const consumedTokens = run.usage.input + run.usage.output + run.usage.cacheRead + run.usage.cacheWrite;
+				const tokenOverrun = run.budget.maxTokens !== undefined && consumedTokens > run.budget.maxTokens
+					? ` (+${tokens(consumedTokens - run.budget.maxTokens)} in-flight)`
+					: "";
 				const limits = [
 					`${run.agents.length}/${run.budget.maxAgents} agents`,
-					run.budget.maxTokens === undefined ? undefined : `${tokens(run.usage.input + run.usage.output + run.usage.cacheRead + run.usage.cacheWrite)}/${tokens(run.budget.maxTokens)} tokens`,
+					run.budget.maxTokens === undefined ? undefined : `${tokens(consumedTokens)}/${tokens(run.budget.maxTokens)} tokens${tokenOverrun}`,
 					run.budget.maxCost === undefined ? undefined : `$${run.usage.cost.toFixed(4)}/$${run.budget.maxCost.toFixed(4)}`,
 					`${tokens(run.budget.projectedTokens)} projected`,
 				].filter(Boolean).join(" · ");
-				lines.push(`  ${th.fg(run.budget.exhausted ? "warning" : "dim", `Budget: ${limits}`)}`);
+				lines.push(`  ${th.fg(run.budget.exhausted ? "warning" : "dim", `Scheduling budget: ${limits}`)}`);
 				for (const warning of run.budget.warnings) lines.push(`  ${th.fg("warning", `⚠ ${warning}`)}`);
 			}
 			for (const flag of run.flags) lines.push(`  ${th.fg("warning", `⚑ ${flag}`)}`);

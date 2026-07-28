@@ -54,10 +54,14 @@ export interface WorkflowModelPolicy {
 export interface AgentOptions {
 	id?: string;
 	label?: string;
+	/** Optional per-agent phase override; otherwise the current phase() value is used. */
+	phase?: string;
 	kind?: StepKind;
 	model?: string;
 	modelRationale?: string;
 	thinking?: ThinkingLevel;
+	/** Claude Workflow-compatible alias for thinking. */
+	effort?: ThinkingLevel;
 	tools?: string[] | string;
 	profile?: string;
 	writePaths?: string[];
@@ -145,6 +149,12 @@ export interface PermissionRequest {
 	input: Record<string, unknown>;
 }
 
+export interface WorkflowBudgets {
+	maxAgents?: number;
+	maxTokens?: number;
+	maxCost?: number;
+}
+
 export interface WorkflowSpec {
 	name: string;
 	why: string;
@@ -156,11 +166,7 @@ export interface WorkflowSpec {
 	recipe?: string;
 	modelPolicy: WorkflowModelPolicy;
 	size?: WorkflowSize;
-	budgets?: {
-		maxAgents?: number;
-		maxTokens?: number;
-		maxCost?: number;
-	};
+	budgets?: WorkflowBudgets;
 	concurrency?: number;
 	background?: boolean;
 	timeoutMs?: number;

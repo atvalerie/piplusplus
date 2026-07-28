@@ -175,3 +175,23 @@ test("cached results are reused without consuming a second token budget", async 
 	assert.equal(run.agents.every((agent) => agent.cached), true);
 	assert.equal(run.status, "budget_exhausted");
 });
+
+test("Claude-style effort and per-agent phase options map to worker state", async () => {
+	const run = workflow(`
+		phase("Probe");
+		return await agent("verify", { id: "verify", effort: "high", phase: "Adversarial" });
+	`);
+	let observed: { thinking?: string; phase?: string } = {};
+	await createWorkflowController(run, [model], model, callbacks(), {
+		runChildAgent: (async (_cwd: string, agent: any) => {
+			observed = { thinking: agent.thinking, phase: agent.phase };
+			return result("verified");
+		}) as any,
+	}).execute();
+
+	assert.deepEqual(observed, { thinking: "high", phase: "Adversarial" });
+	assert.equal(run.agents[0].thinking, "high");
+	assert.equal(run.agents[0].phase, "Adversarial");
+	assert.deepEqual(run.phases, ["Probe", "Adversarial"]);
+	assert.equal(run.status, "completed");
+});

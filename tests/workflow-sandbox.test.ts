@@ -37,6 +37,34 @@ test("sandbox preserves dependent and parallel JavaScript orchestration", async 
 	assert.deepEqual(calls, [["alpha", "Research"], ["beta", "Research"]]);
 });
 
+test("a later phase cannot consume parallel results until every prior worker settles", async () => {
+	const events: string[] = [];
+	const completed = new Set<string>();
+	const result = await executeSandboxedWorkflow(`
+		phase("Probe");
+		const probes = await parallel([() => agent("patterns"), () => agent("surface")]);
+		phase("Adversarial");
+		const verdict = await agent("verify:" + probes.join("+"), { phase: "Adversarial", effort: "high" });
+		return { probes, verdict };
+	`, bindings(async (prompt, options, phase) => {
+		const name = String(prompt);
+		events.push(`start:${name}:${phase}`);
+		if (name === "patterns" || name === "surface") {
+			await new Promise((resolve) => setTimeout(resolve, name === "patterns" ? 12 : 2));
+			completed.add(name);
+			events.push(`done:${name}`);
+			return name.toUpperCase();
+		}
+		assert.deepEqual([...completed].sort(), ["patterns", "surface"]);
+		assert.equal((options as { effort?: string }).effort, "high");
+		events.push(`done:${name}`);
+		return "SAFE";
+	}), { timeoutMs: 2_000 });
+
+	assert.deepEqual(result, { probes: ["PATTERNS", "SURFACE"], verdict: "SAFE" });
+	assert.equal(events.findIndex((event) => event.startsWith("start:verify:")), events.length - 2);
+});
+
 test("sandbox marshals structured agent objects, arrays, scalars, and null as guest values", async () => {
 	const result = await executeSandboxedWorkflow(`
 		const object = await agent("object");

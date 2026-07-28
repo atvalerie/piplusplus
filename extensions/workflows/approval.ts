@@ -14,9 +14,9 @@ export function inspectWorkflowPlan(spec: WorkflowSpec): WorkflowPlanPreview {
 	const staticAgentSites = [...spec.script.matchAll(/\bagent\s*\(/g)].length;
 	const cautions: string[] = [];
 	if (staticAgentSites > 25) cautions.push(`Static script contains ${staticAgentSites} agent call sites; runs above 25 agents trigger a large-run warning.`);
-	if (spec.budgets?.maxTokens !== undefined) cautions.push(`Hard token cap: ${spec.budgets.maxTokens.toLocaleString("en-US")}.`);
+	if (spec.budgets?.maxTokens !== undefined) cautions.push(`Token scheduling threshold: ${spec.budgets.maxTokens.toLocaleString("en-US")}; already-running workers may report additional usage.`);
 	else cautions.push("No hard token cap is configured.");
-	if (spec.budgets?.maxCost !== undefined) cautions.push(`Hard cost cap: $${spec.budgets.maxCost.toFixed(4)}.`);
+	if (spec.budgets?.maxCost !== undefined) cautions.push(`Cost scheduling threshold: $${spec.budgets.maxCost.toFixed(4)}; already-running workers may report additional cost.`);
 	else cautions.push("No hard cost cap is configured.");
 	if (spec.budgets?.maxAgents !== undefined) cautions.push(`Hard agent cap: ${spec.budgets.maxAgents}.`);
 	return { phases, staticAgentSites, cautions };

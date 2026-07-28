@@ -28,6 +28,36 @@ test("saved workflow parser validates meta and produces an executable body", asy
 	await assert.rejects(() => parseSavedWorkflowSource(`export const meta = { name: "bad", description: "bad", extra: true }; return 1;`), /Unknown/);
 });
 
+test("saved workflow parser accepts bounded Claude-style phase metadata", async () => {
+	const parsed = await parseSavedWorkflowSource(`
+		export const meta = {
+			name: "two-stage",
+			description: "Probe first, then verify",
+			phases: [
+				{ title: "Probe", detail: "parallel discovery" },
+				{ title: "Adversarial", detail: "depends on probe results" },
+			],
+		};
+		phase("Probe");
+		const first = await parallel([() => agent("one"), () => agent("two")]);
+		phase("Adversarial");
+		return agent(JSON.stringify(first), { effort: "high", phase: "Adversarial" });
+	`);
+	assert.deepEqual(parsed.meta.phases, [
+		{ title: "Probe", detail: "parallel discovery" },
+		{ title: "Adversarial", detail: "depends on probe results" },
+	]);
+	assert.match(parsed.script, /effort: "high"/);
+	await assert.rejects(() => parseSavedWorkflowSource(`
+		export const meta = {
+			name: "bad-phase",
+			description: "bad",
+			phases: [{ title: "Probe", unexpected: true }],
+		};
+		return 1;
+	`), /Unknown saved workflow meta\.phases/);
+});
+
 test("structured saved-workflow args round-trip and reject non-JSON input", () => {
 	assert.deepEqual(parseSavedWorkflowArgs('{"query":"x","limit":2}'), { query: "x", limit: 2 });
 	assert.deepEqual(parseSavedWorkflowArgs(""), {});

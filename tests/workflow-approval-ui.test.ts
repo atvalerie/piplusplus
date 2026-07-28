@@ -59,8 +59,8 @@ test("approval preview shows phases, expected size, policy, and usage cautions",
 	assert.match(summary, /Expected size: small/);
 	assert.match(summary, /providers: modelhub/);
 	assert.match(summary, /families: openai/);
-	assert.match(summary, /Hard token cap: 100,000/);
-	assert.match(summary, /Hard cost cap: \$2\.0000/);
+	assert.match(summary, /Token scheduling threshold: 100,000/);
+	assert.match(summary, /Cost scheduling threshold: \$2\.0000/);
 });
 
 test("persistent trust requires an explicit writer call and invalidates on script or project changes", async () => {

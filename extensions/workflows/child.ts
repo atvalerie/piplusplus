@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
+import type { Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { Message, Model } from "@earendil-works/pi-ai";
@@ -15,6 +16,41 @@ const MAX_STDERR_BYTES = 1024 * 1024;
 const MAX_LOG_EVENTS = 100_000;
 const MAX_TOOL_CALLS = 10_000;
 const MAX_RAW_EVENTS = 50_000;
+const CLOSED_PERMISSION_PIPE_CODES = new Set(["EPIPE", "ERR_STREAM_DESTROYED", "ERR_STREAM_WRITE_AFTER_END"]);
+
+export function isClosedPermissionPipeError(error: unknown): boolean {
+	return Boolean(error && typeof error === "object" && CLOSED_PERMISSION_PIPE_CODES.has(String((error as NodeJS.ErrnoException).code)));
+}
+
+/**
+ * Child permission requests can outlive the child process by a few event-loop
+ * turns while a user decision is pending. Keep that normal close/write race
+ * local to the IPC channel instead of letting its EPIPE escape as an
+ * uncaughtException in the parent Pi process.
+ */
+export function createPermissionResponseWriter(
+	stream: Writable,
+	onUnexpectedError: (error: Error) => void = () => {},
+): (response: { id: string; allow: boolean }) => boolean {
+	let closed = stream.destroyed || stream.writableEnded || !stream.writable;
+	const handleError = (error: Error) => {
+		closed = true;
+		if (!isClosedPermissionPipeError(error)) onUnexpectedError(error);
+	};
+	stream.on("error", handleError);
+	stream.on("close", () => { closed = true; });
+	stream.on("finish", () => { closed = true; });
+	return (response) => {
+		if (closed || stream.destroyed || stream.writableEnded || !stream.writable) return false;
+		try {
+			stream.write(`${JSON.stringify(response)}\n`);
+			return true;
+		} catch (error) {
+			handleError(error instanceof Error ? error : new Error(String(error)));
+			return false;
+		}
+	};
+}
 
 function invocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
@@ -105,12 +141,24 @@ export async function runChildAgent(
 		const permissionInput = proc.stdio[4];
 		if (permissionOutput && permissionInput) {
 			const requests = readline.createInterface({ input: permissionOutput });
+			const writePermissionResponse = createPermissionResponseWriter(permissionInput, (error) => {
+				addLog({ at: Date.now(), type: "permission_ipc_error", message: error.message });
+			});
 			requests.on("line", (line) => {
 				void (async () => {
 					let request: { id: string; toolName: string; input: Record<string, unknown> };
 					try { request = JSON.parse(line); } catch { return; }
-					const allow = await onPermission({ agentId: agent.id, agentLabel: agent.label, toolName: request.toolName, input: request.input });
-					permissionInput.write(`${JSON.stringify({ id: request.id, allow })}\n`);
+					let allow = false;
+					try {
+						allow = await onPermission({ agentId: agent.id, agentLabel: agent.label, toolName: request.toolName, input: request.input });
+					} catch (error) {
+						addLog({
+							at: Date.now(),
+							type: "permission_handler_error",
+							message: error instanceof Error ? error.message : String(error),
+						});
+					}
+					writePermissionResponse({ id: request.id, allow });
 				})();
 			});
 		}
