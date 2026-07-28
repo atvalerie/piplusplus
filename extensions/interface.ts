@@ -20,21 +20,24 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 	const aliases = new CommandAliasRegistry(path.join(getAgentDir(), "piplusplus-aliases.json"));
 	const registeredAliases = new Set<string>();
 	const registerAliasCommand = (name: string) => {
-		if (registeredAliases.has(name) || pi.getCommands().some((command) => command.name === name)) return;
+		if (registeredAliases.has(name)) return;
 		const alias = aliases.list().find((candidate) => candidate.name === name);
 		if (!alias) return;
-		pi.registerCommand(name, {
-			description: `Alias for ${alias.target}`,
-			handler: async (args, ctx) => {
-				const expanded = aliases.resolve(`/${name}${args.trim() ? ` ${args.trim()}` : ""}`);
-				if (expanded === `/${name}${args.trim() ? ` ${args.trim()}` : ""}`) { ctx.ui.notify(`Alias /${name} is no longer configured; reload to remove its completion.`, "warning"); return; }
-				// The custom editor normally expands before native dispatch. This is a
-				// fallback for hosts that dispatch the registered command first.
-				ctx.ui.setEditorText(expanded);
-				ctx.ui.notify(`Expanded /${name} → ${expanded}`, "info");
-			},
-		});
-		registeredAliases.add(name);
+		try {
+			pi.registerCommand(name, {
+				description: `Alias for ${alias.target}`,
+				handler: async (args, ctx) => {
+					const original = `/${name}${args.trim() ? ` ${args.trim()}` : ""}`;
+					const expanded = aliases.resolve(original);
+					if (expanded === original) { ctx.ui.notify(`Alias /${name} is no longer configured; reload to remove its completion.`, "warning"); return; }
+					// The custom editor normally expands before native dispatch. This is a
+					// fallback for hosts that dispatch the registered command first.
+					ctx.ui.setEditorText(expanded);
+					ctx.ui.notify(`Expanded /${name} → ${expanded}`, "info");
+				},
+			});
+			registeredAliases.add(name);
+		} catch { /* A native or earlier extension command owns this name. */ }
 	};
 	for (const alias of aliases.list()) registerAliasCommand(alias.name);
 
