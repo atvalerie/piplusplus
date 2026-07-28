@@ -24,3 +24,5 @@ export default function (pi: ExtensionAPI) {
 
 - `auto-update.ts` — periodically updates unpinned Pi packages.
 - `workflows.ts` / `workflows/` — JavaScript-orchestrated dynamic workflows with independently prompted and model-routed subagents, background execution, drill-down TUI state, usage statistics, flags, and error reporting.
+- `ui-gallery.ts` — interactive gallery for validating Pi++ foundation, static, responsive, and navigation primitives.
+- `interface.ts` — Quiet Control Room composer, responsive footer, and streaming indicator for Pi's main TUI.

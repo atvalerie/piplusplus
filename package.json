@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "description": "A collection of independently configurable Pi extensions.",
   "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "test:ui": "node --test tests/ui-foundation.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "0.82.1"
+  },
   "keywords": [
     "pi-package"
   ],
