@@ -1,20 +1,30 @@
 import { CustomEditor, type Theme } from "@earendil-works/pi-coding-agent";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import type { CommandAliasRegistry } from "./command-aliases.ts";
 import { fitLine, visibleWidth } from "../foundation/text.ts";
 import { paint } from "../primitives/theme.ts";
 
 export class ControlRoomEditor extends CustomEditor {
 	private readonly appTheme: Theme;
+	private readonly keybindings: KeybindingsManager;
+	private readonly aliases?: CommandAliasRegistry;
 	onPiPlusPlusShortcut?: (data: string) => boolean;
 
-	constructor(tui: TUI, editorTheme: EditorTheme, keybindings: KeybindingsManager, appTheme: Theme) {
+	constructor(tui: TUI, editorTheme: EditorTheme, keybindings: KeybindingsManager, appTheme: Theme, aliases?: CommandAliasRegistry) {
 		super(tui, editorTheme, keybindings, { paddingX: 1, autocompleteMaxVisible: 8 });
 		this.appTheme = appTheme;
+		this.keybindings = keybindings;
+		this.aliases = aliases;
 	}
 
 	handleInput(data: string): void {
 		if (this.onPiPlusPlusShortcut?.(data)) return;
+		if (this.aliases && this.keybindings.matches(data, "tui.input.submit")) {
+			const input = this.getExpandedText();
+			const resolved = this.aliases.resolve(input);
+			if (resolved !== input) this.setText(resolved);
+		}
 		super.handleInput(data);
 	}
 

@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CommandAliasRegistry } from "../ui/interface/command-aliases.ts";
 import { ControlRoomEditor } from "../ui/interface/editor.ts";
 import { EffortPicker, effortLevels, type EffortLevel } from "../ui/interface/effort.ts";
 import { renderFooter } from "../ui/interface/footer.ts";
@@ -14,6 +15,7 @@ const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 export default function interfaceExtension(pi: ExtensionAPI) {
 	if (process.env[CHILD_ENV] === "1") return;
 	const registry = new PiPlusPlusKeybindingRegistry(path.join(getAgentDir(), "piplusplus-keybindings.json"));
+	const aliases = new CommandAliasRegistry(path.join(getAgentDir(), "piplusplus-aliases.json"));
 
 	const showEffort = async (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") return;
@@ -68,12 +70,42 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("keybindings", { description: "Browse, search, and configure every Pi keybinding", handler: async (_args, ctx) => showKeybindings(ctx) });
+	const showAliases = (ctx: ExtensionContext) => {
+		const configured = aliases.list();
+		ctx.ui.notify(configured.length ? configured.map((alias) => `/${alias.name} → ${alias.target}${alias.customized ? " (custom)" : " (default)"}`).join("\n") : "No command aliases configured.", "info");
+	};
+	pi.registerCommand("aliases", { description: "List editable command aliases", handler: async (_args, ctx) => showAliases(ctx) });
+	pi.registerCommand("alias", {
+		description: "Set an alias: /alias NAME TARGET; remove or reset with /alias remove|reset NAME",
+		handler: async (args, ctx) => {
+			const [first, second, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			if (!first) { showAliases(ctx); return; }
+			try {
+				if (first === "remove" || first === "delete") {
+					if (!second) throw new Error("Usage: /alias remove NAME");
+					aliases.remove(second);
+					ctx.ui.notify(`Removed /${second.replace(/^\//, "")}.`, "info");
+					return;
+				}
+				if (first === "reset") {
+					if (!second) throw new Error("Usage: /alias reset NAME");
+					aliases.reset(second);
+					ctx.ui.notify(`Reset /${second.replace(/^\//, "")} to its default.`, "info");
+					return;
+				}
+				if (!second) throw new Error("Usage: /alias NAME TARGET");
+				const target = [second, ...rest].join(" ");
+				aliases.set(first, target);
+				ctx.ui.notify(`/${first.replace(/^\//, "")} → ${target.startsWith("/") ? target : `/${target}`}`, "info");
+			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+		},
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
 		ctx.ui.setEditorComponent((tui, editorTheme, keybindings) => {
-			const editor = new ControlRoomEditor(tui, editorTheme, keybindings, ctx.ui.theme);
+			const editor = new ControlRoomEditor(tui, editorTheme, keybindings, ctx.ui.theme, aliases);
 			editor.onPiPlusPlusShortcut = (data) => {
 				if (registry.matches(data, "piplusplus.keybindings.open")) { void showKeybindings(ctx); return true; }
 				if (registry.matches(data, "piplusplus.effort.open")) { void showEffort(ctx); return true; }

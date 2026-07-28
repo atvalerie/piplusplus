@@ -32,4 +32,4 @@ export default function (pi: ExtensionAPI) {
 - `modelhub-telemetry.ts` — optional ModelHub wallet, limits, usage, keys, and savings adapter.
 - `telemetry-ui.ts` — provider-neutral `/telemetry` side inspector and `setup`/`clear` flow for adapter-declared secrets.
 - `ui-gallery.ts` — interactive gallery for validating Pi++ foundation, static, responsive, and navigation primitives.
-- `interface.ts` — Quiet Control Room composer, responsive footer, streaming indicator, and optional shared telemetry summary for Pi's main TUI.
+- `interface.ts` — Quiet Control Room composer, responsive footer, streaming indicator, editable command aliases, and optional shared telemetry summary for Pi's main TUI.

@@ -6,6 +6,7 @@ import test from "node:test";
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { EffortPicker } from "../ui/interface/effort.ts";
 import { formatCount, renderFooter, type FooterSnapshot } from "../ui/interface/footer.ts";
+import { CommandAliasRegistry } from "../ui/interface/command-aliases.ts";
 import { KeybindingBrowser } from "../ui/interface/keybindings.ts";
 import { PiPlusPlusKeybindingRegistry } from "../ui/interface/piplusplus-keybindings.ts";
 import { visibleWidth } from "../ui/foundation/text.ts";
@@ -78,6 +79,23 @@ test("keybinding browser captures and persists replacement keys", () => {
 	assert.deepEqual(user["app.alpha"], ["z"]);
 	assert.deepEqual(JSON.parse(fs.readFileSync(configPath, "utf8"))["app.alpha"], ["z"]);
 	assert.ok(browser.render(72).every((line) => visibleWidth(line) <= 72));
+	fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("command aliases resolve before submission and persist edits", () => {
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-aliases-"));
+	const configPath = path.join(directory, "aliases.json");
+	const aliases = new CommandAliasRegistry(configPath);
+	assert.equal(aliases.resolve("/exit"), "/quit");
+	assert.equal(aliases.resolve("/exit now"), "/quit now");
+	aliases.set("bye", "exit");
+	assert.equal(aliases.resolve("/bye"), "/quit");
+	assert.equal(new CommandAliasRegistry(configPath).resolve("/bye later"), "/quit later");
+	assert.throws(() => aliases.set("exit", "bye"), /cycle/i);
+	aliases.remove("exit");
+	assert.equal(aliases.resolve("/exit"), "/exit");
+	aliases.reset("exit");
+	assert.equal(aliases.resolve("/exit"), "/quit");
 	fs.rmSync(directory, { recursive: true, force: true });
 });
 
