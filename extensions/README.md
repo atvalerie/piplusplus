@@ -19,3 +19,8 @@ export default function (pi: ExtensionAPI) {
   // Register tools, commands, or event handlers here.
 }
 ```
+
+## Included resources
+
+- `auto-update.ts` — periodically updates unpinned Pi packages.
+- `workflows.ts` / `workflows/` — JavaScript-orchestrated dynamic workflows with independently prompted and model-routed subagents, background execution, drill-down TUI state, usage statistics, flags, and error reporting.
