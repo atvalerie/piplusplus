@@ -1,0 +1,14 @@
+{
+  "name": "piplusplus",
+  "version": "0.1.0",
+  "description": "A collection of independently configurable Pi extensions.",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/*.ts"
+    ]
+  }
+}
