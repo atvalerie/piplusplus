@@ -39,7 +39,7 @@ export function renderFooter(snapshot: FooterSnapshot, width: number, theme: The
 	const provider = snapshot.providerBalance === undefined ? "" : ` · bal $${snapshot.providerBalance.toFixed(2)}${snapshot.providerSavings === undefined ? "" : ` · saved ~$${snapshot.providerSavings.toFixed(3)}`}`;
 	const usage = paint(theme, `${context} · ↑${formatCount(snapshot.inputTokens)} ↓${formatCount(snapshot.outputTokens)} · $${snapshot.cost.toFixed(3)}${provider}`, "subtle");
 	const permission = snapshot.permissionMode
-		? paint(theme, `perm:${snapshot.permissionMode}`, snapshot.permissionMode === "auto" ? "success" : snapshot.permissionMode === "manual" ? "warning" : snapshot.permissionMode === "plan" ? "accent" : "muted", "strong")
+		? paint(theme, `perm:${snapshot.permissionMode}`, snapshot.permissionMode === "dangerous" ? "error" : snapshot.permissionMode === "auto" || snapshot.permissionMode === "accept-edits" ? "success" : snapshot.permissionMode === "manual" ? "warning" : snapshot.permissionMode === "plan" ? "accent" : "muted", "strong")
 		: paint(theme, "perm:—", "subtle");
 	if (width < 52) return [fitLine(`${permission} · ${model} · ${context}`, width)];
 	const activity = snapshot.statuses?.filter(Boolean) ?? [];

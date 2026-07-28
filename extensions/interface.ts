@@ -17,6 +17,25 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 	if (process.env[CHILD_ENV] === "1") return;
 	const registry = new PiPlusPlusKeybindingRegistry(path.join(getAgentDir(), "piplusplus-keybindings.json"));
 	const aliases = new CommandAliasRegistry(path.join(getAgentDir(), "piplusplus-aliases.json"));
+	const registeredAliases = new Set<string>();
+	const registerAliasCommand = (name: string) => {
+		if (registeredAliases.has(name) || pi.getCommands().some((command) => command.name === name)) return;
+		const alias = aliases.list().find((candidate) => candidate.name === name);
+		if (!alias) return;
+		pi.registerCommand(name, {
+			description: `Alias for ${alias.target}`,
+			handler: async (args, ctx) => {
+				const expanded = aliases.resolve(`/${name}${args.trim() ? ` ${args.trim()}` : ""}`);
+				if (expanded === `/${name}${args.trim() ? ` ${args.trim()}` : ""}`) { ctx.ui.notify(`Alias /${name} is no longer configured; reload to remove its completion.`, "warning"); return; }
+				// The custom editor normally expands before native dispatch. This is a
+				// fallback for hosts that dispatch the registered command first.
+				ctx.ui.setEditorText(expanded);
+				ctx.ui.notify(`Expanded /${name} → ${expanded}`, "info");
+			},
+		});
+		registeredAliases.add(name);
+	};
+	for (const alias of aliases.list()) registerAliasCommand(alias.name);
 
 	const showEffort = async (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui") return;
@@ -97,6 +116,7 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 				if (!second) throw new Error("Usage: /alias NAME TARGET");
 				const target = [second, ...rest].join(" ");
 				aliases.set(first, target);
+				registerAliasCommand(first.replace(/^\//, "").toLowerCase());
 				ctx.ui.notify(`/${first.replace(/^\//, "")} → ${target.startsWith("/") ? target : `/${target}`}`, "info");
 			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 		},

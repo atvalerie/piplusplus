@@ -23,7 +23,12 @@ export class ControlRoomEditor extends CustomEditor {
 		if (this.aliases && this.keybindings.matches(data, "tui.input.submit")) {
 			const input = this.getExpandedText();
 			const resolved = this.aliases.resolve(input);
-			if (resolved !== input) this.setText(resolved);
+			if (resolved !== input) {
+				// Close the slash autocomplete before replacing the command; otherwise
+				// its stale selection consumes Enter and overwrites the alias expansion.
+				super.handleInput("\x1b");
+				this.setText(resolved);
+			}
 		}
 		super.handleInput(data);
 	}

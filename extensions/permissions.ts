@@ -4,9 +4,18 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import { explainPermission } from "./workflows/permissions.ts";
 import { installPermissionService, removePermissionService, type GlobalPermissionMode, type PermissionService } from "./shared/permission-service.ts";
 import type { PermissionRequest } from "./workflows/types.ts";
+import { Key } from "@earendil-works/pi-tui";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
-const BASE_MODES: GlobalPermissionMode[] = ["manual", "auto", "read-only"];
+const BASE_MODES: GlobalPermissionMode[] = ["manual", "accept-edits", "auto", "read-only", "dangerous"];
+const MODE_DESCRIPTIONS: Record<GlobalPermissionMode, string> = {
+	manual: "confirm edits and commands",
+	"accept-edits": "accept direct edits; confirm commands",
+	auto: "automatically allow proven low-risk operations",
+	"read-only": "block mutations",
+	plan: "read-only exploration followed by plan approval",
+	dangerous: "bypass all Pi++ tool confirmation",
+};
 
 export default function permissionsExtension(pi: ExtensionAPI) {
 	if (process.env[CHILD_ENV] === "1") return;
@@ -26,7 +35,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 	const persist = async () => {
 		await fs.promises.mkdir(path.dirname(configPath), { recursive: true });
 		const temp = `${configPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-		await fs.promises.writeFile(temp, `${JSON.stringify({ mode }, null, 2)}\n`, { mode: 0o600 });
+		await fs.promises.writeFile(temp, `${JSON.stringify({ mode: configuredMode }, null, 2)}\n`, { mode: 0o600 });
 		await fs.promises.rename(temp, configPath);
 	};
 
@@ -43,15 +52,20 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		},
 		async setMode(value) {
 			if (!availableModes.has(value)) throw new Error(`Permission mode is unavailable: ${value}`);
-			mode = value; configuredMode = value; await persist(); for (const listener of listeners) listener();
+			mode = value; configuredMode = value === "dangerous" ? "manual" : value; await persist(); for (const listener of listeners) listener();
 		},
 		subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
 		async authorize(request, suppliedContext, options) {
+			if (mode === "dangerous") return true;
 			const ctx = suppliedContext ?? currentContext;
 			const cwd = ctx?.cwd ?? process.cwd();
-			const decision = explainPermission(request, cwd, mode === "plan" ? "auto" : mode);
+			const policyMode = mode === "plan" || mode === "accept-edits" ? "auto" : mode;
+			const decision = explainPermission(request, cwd, policyMode);
 			if (mode === "plan") return decision.risk === "safe" && decision.allow;
-			if (decision.automatic && !options?.forcePrompt) return decision.allow;
+			if (mode === "accept-edits") {
+				if ((request.toolName === "write" || request.toolName === "edit") && !options?.forcePrompt) return true;
+				if (["read", "grep", "find", "ls"].includes(request.toolName)) return true;
+			} else if (decision.automatic && !options?.forcePrompt) return decision.allow;
 			if (!ctx?.hasUI) return false;
 			const input = request.toolName === "bash" ? String(request.input.command ?? "") : JSON.stringify(request.input, null, 2);
 			let allowed = false;
@@ -77,20 +91,24 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		return allow ? undefined : { block: true, reason: `Blocked by global ${mode} permission policy` };
 	});
 
-	pi.registerCommand("permissions", {
-		description: "View or change the global tool permission mode",
-		handler: async (args, ctx) => {
-			const modes = [...availableModes];
-			const requested = args.trim() as GlobalPermissionMode;
-			let selected: GlobalPermissionMode | undefined = modes.includes(requested) ? requested : undefined;
-			if (!selected && args.trim()) { ctx.ui.notify(`Unknown permission mode: ${args.trim()}`, "error"); return; }
-			if (!selected) selected = await ctx.ui.select(`Global permissions · ${mode}`, modes.map((item) => `${item}${item === mode ? " · current" : ""}`)) as GlobalPermissionMode | undefined;
-			if (!selected) return;
-			selected = selected.split(" · ")[0] as GlobalPermissionMode;
-			await service.setMode(selected);
-			ctx.ui.notify(`Permission mode: ${selected}`, "info");
-		},
-	});
+	const selectMode = async (requestedText: string, ctx: ExtensionContext) => {
+		const modes = [...availableModes];
+		const requested = requestedText.trim() as GlobalPermissionMode;
+		let selected: GlobalPermissionMode | undefined = modes.includes(requested) ? requested : undefined;
+		if (!selected && requestedText.trim()) { ctx.ui.notify(`Unknown permission mode: ${requestedText.trim()}`, "error"); return; }
+		if (!selected) selected = await ctx.ui.select(`Global permissions · ${mode}`, modes.map((item) => `${item} · ${MODE_DESCRIPTIONS[item]}${item === mode ? " · current" : ""}`)) as GlobalPermissionMode | undefined;
+		if (!selected) return;
+		selected = selected.split(" · ")[0] as GlobalPermissionMode;
+		if (selected === "dangerous" && ctx.hasUI) {
+			const confirmation = await ctx.ui.select("Dangerous mode disables every Pi++ tool confirmation, including shell commands and writes outside the project.", ["Cancel", "Enable dangerous mode"]);
+			if (confirmation !== "Enable dangerous mode") return;
+		}
+		await service.setMode(selected);
+		ctx.ui.notify(`Permission mode: ${selected}`, "info");
+	};
+
+	pi.registerCommand("permissions", { description: "View or change the global tool permission mode", handler: selectMode });
+	pi.registerShortcut(Key.ctrlAlt("m"), { description: "Open Pi++ permission mode selector", handler: async (ctx) => selectMode("", ctx) });
 
 	pi.on("session_start", (_event, ctx) => { currentContext = ctx; });
 	pi.on("session_shutdown", () => { currentContext = undefined; listeners.clear(); removePermissionService(service); });

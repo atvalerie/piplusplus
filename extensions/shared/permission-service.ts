@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { PermissionRequest } from "./workflows/types.ts";
 
-export type GlobalPermissionMode = "manual" | "auto" | "read-only" | "plan";
+export type GlobalPermissionMode = "manual" | "accept-edits" | "auto" | "read-only" | "plan" | "dangerous";
 export interface PermissionService {
 	getMode(): GlobalPermissionMode;
 	setMode(mode: GlobalPermissionMode): Promise<void>;

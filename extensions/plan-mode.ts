@@ -75,7 +75,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		await setPermission(permissionBefore === "plan" ? "manual" : permissionBefore);
 		ctx.ui.notify("Plan mode canceled", "info");
 	};
-	const executePlan = async (ctx: ExtensionContext, permission: "auto" | "manual" = "manual") => {
+	const executePlan = async (ctx: ExtensionContext, permission: "accept-edits" | "auto" | "manual" = "manual") => {
 		if (!approvedPlan || !steps.length) { ctx.ui.notify("No approved plan to execute", "warning"); return; }
 		await setPermission(permission);
 		setPlanState("executing", ctx);
@@ -85,7 +85,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			display: true,
 		}, { triggerTurn: true, deliverAs: "followUp" });
 	};
-	const compactThenExecute = (ctx: ExtensionContext, permission: "auto" | "manual" = "auto") => {
+	const compactThenExecute = (ctx: ExtensionContext, permission: "accept-edits" | "auto" | "manual" = "accept-edits") => {
 		if (!approvedPlan) return;
 		setPlanState("compacting", ctx);
 		ctx.ui.notify("Compacting planning context before execution…", "info");
@@ -109,7 +109,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			if (!action || action === "on" || action === "start") { await beginPlanning(ctx); return; }
 			if (action === "status") { showStatus(ctx); return; }
 			if (action === "execute" || action === "run") { await executePlan(ctx, "manual"); return; }
-			if (action === "compact") { compactThenExecute(ctx, "auto"); return; }
+			if (action === "compact") { compactThenExecute(ctx, "accept-edits"); return; }
 			if (action === "cancel" || action === "off") { await cancel(ctx); return; }
 			if (action.startsWith("done ")) {
 				const step = steps.find((item) => item.number === Number(action.slice(5)));
@@ -161,15 +161,17 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		const usageLabel = usage?.tokens !== null && usage?.tokens !== undefined && usage.percent !== null ? ` · ${Math.round(usage.percent)}% / ${usage.tokens.toLocaleString()} tokens` : "";
 		const compactLabel = `Compact context${usageLabel}, then execute`;
 		const choice = await ctx.ui.select(`Approve plan\n\n${formatPlanSteps(steps)}`, [
-			`Yes · ${compactLabel} · auto mode`,
-			"Yes · execute in auto mode",
+			`Yes · ${compactLabel} · accept all edits`,
+			"Yes · execute and accept all edits",
+			"Yes · execute in conservative auto mode",
 			"Yes · execute with manual approvals",
 			"No · keep planning",
 			"Refine plan",
 			"Cancel plan",
 		]);
-		if (choice?.startsWith("Yes · Compact")) compactThenExecute(ctx, "auto");
-		else if (choice === "Yes · execute in auto mode") await executePlan(ctx, "auto");
+		if (choice?.startsWith("Yes · Compact")) compactThenExecute(ctx, "accept-edits");
+		else if (choice === "Yes · execute and accept all edits") await executePlan(ctx, "accept-edits");
+		else if (choice === "Yes · execute in conservative auto mode") await executePlan(ctx, "auto");
 		else if (choice === "Yes · execute with manual approvals") await executePlan(ctx, "manual");
 		else if (choice === "Refine plan") {
 			const refinement = await ctx.ui.editor("Plan changes or missing constraints", "");

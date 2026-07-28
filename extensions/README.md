@@ -23,7 +23,7 @@ export default function (pi: ExtensionAPI) {
 ## Included resources
 
 - `auto-update.ts` — periodically updates unpinned Pi packages.
-- `permissions.ts` — global manual, conservative auto, and read-only permission policy with explanatory confirmation modals and a dependency service for other extensions.
+- `permissions.ts` — global manual, accept-edits, conservative auto, read-only, optional plan, and session-only dangerous modes with explanatory confirmation and a dependency service for other extensions.
 - `plan-mode.ts` / `shared/plan-mode.ts` — standalone Claude-style `plan` permission mode, read-only planning, auto/manual execution acceptance, optional native compaction, exact plan handoff, and persistent progress.
 - `shared/permission-service.ts` — shared dependency contract used by the permission extension and consumers such as workflows.
 - `workflows.ts` / `workflows/` — audited diagnose/design/review/implement recipes plus sandboxed custom JavaScript workflows, reusable specialist profiles, structured-output validation, semantic approval gates, scoped direct writes, independently model-routed workers, retries, live usage, complete JSON artifacts, and drill-down TUI controls.
