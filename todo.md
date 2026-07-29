@@ -8,7 +8,7 @@ Target runtime:
 
 - Pi `0.82.1`
 - Claude Code behavior reference `2.1.220`
-- Workflow models are limited to the authenticated provider groups `opencode-go`, `anthropic`, `openai`, and `modelhub`; `modelhub-2`, ... `modelhub-8` collapse to the `modelhub` group.
+- Workflow models are limited to the authenticated provider groups `opencode-go`, `anthropic`, `openai`, and `modelhub`; Pi's `openai-codex` ChatGPT OAuth provider normalizes to `openai`, while `modelhub-2`, ... `modelhub-8` collapse to `modelhub`.
 - Natural-language model preferences are interpreted by the main orchestrating model. Do not reintroduce keyword or language-specific regex parsing.
 - Private Claude Code prompts and implementation details are not available. Match observable/documented behavior and explicitly document intentional Pi++ extensions.
 

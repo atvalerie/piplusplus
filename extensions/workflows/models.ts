@@ -40,10 +40,16 @@ export function resolveWorkflowThinking(
 	return { effective, provider: model.thinkingLevelMap?.[effective] ?? effective };
 }
 
-/** Normalize exact Pi provider IDs into the four provider groups supported by workflows. */
+/**
+ * Normalize exact Pi provider IDs into the four provider groups supported by
+ * workflows. Pi exposes ChatGPT Plus/Pro OAuth models through `openai-codex`,
+ * while API-key OpenAI models use `openai`; both are OpenAI sources for policy
+ * purposes, but the exact provider ID is preserved when launching a child.
+ */
 export function workflowProvider(model: Pick<Model, "provider">): WorkflowProvider | undefined {
 	const provider = model.provider.trim().toLowerCase();
 	if (/^modelhub(?:-[2-8])?$/.test(provider)) return "modelhub";
+	if (provider === "openai-codex") return "openai";
 	return SUPPORTED_PROVIDER_SET.has(provider) ? provider as WorkflowProvider : undefined;
 }
 
@@ -55,7 +61,7 @@ export function modelFamily(model: Pick<Model, "provider" | "id" | "name">): Mod
 	const modelHub = modelHubFamilyFor(model);
 	if (modelHub) return modelHub;
 	const provider = model.provider.toLowerCase();
-	if (provider === "openai") return "openai";
+	if (provider === "openai" || provider === "openai-codex") return "openai";
 	if (provider === "anthropic") return "anthropic";
 	return undefined;
 }

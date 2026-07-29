@@ -46,18 +46,21 @@ test("omitted worker models inherit while auto routing remains explicit", () => 
 
 test("workflow provider groups distinguish source constraints from underlying model families", () => {
 	const directOpenAI = { provider: "openai", id: "gpt-direct", name: "GPT Direct" } as any;
+	const codexOAuth = { provider: "openai-codex", id: "gpt-codex", name: "GPT Codex OAuth" } as any;
 	const directAnthropic = { provider: "anthropic", id: "claude-direct", name: "Claude Direct" } as any;
 	const openCodeGo = { provider: "opencode-go", id: "kimi-k2.7-code", name: "Kimi" } as any;
 	const modelHubAlias = { provider: "modelhub-8", id: "gpt-5-mini", name: "GPT through ModelHub" } as any;
 	const unsupported = { provider: "google", id: "gemini", name: "Gemini" } as any;
 
 	assert.equal(workflowProvider(directOpenAI), "openai");
+	assert.equal(workflowProvider(codexOAuth), "openai");
 	assert.equal(workflowProvider(directAnthropic), "anthropic");
 	assert.equal(workflowProvider(openCodeGo), "opencode-go");
 	assert.equal(workflowProvider(modelHubAlias), "modelhub");
 	assert.equal(workflowProvider(unsupported), undefined);
-	assert.deepEqual(filterSupportedWorkflowModels([directOpenAI, directAnthropic, openCodeGo, modelHubAlias, unsupported]), [
+	assert.deepEqual(filterSupportedWorkflowModels([directOpenAI, codexOAuth, directAnthropic, openCodeGo, modelHubAlias, unsupported]), [
 		directOpenAI,
+		codexOAuth,
 		directAnthropic,
 		openCodeGo,
 		modelHubAlias,
@@ -73,6 +76,13 @@ test("workflow provider groups distinguish source constraints from underlying mo
 		allowedProviders: ["opencode-go"],
 		rationale: "Use only OpenCode Go.",
 	}), false);
+	assert.equal(modelFamily(codexOAuth), "openai");
+	assert.equal(modelAllowedByPolicy(codexOAuth, {
+		defaultRouting: "inherit",
+		allowedProviders: ["openai"],
+		allowedFamilies: ["openai"],
+		rationale: "Use OpenAI through ChatGPT OAuth.",
+	}), true);
 	assert.equal(modelAllowedByPolicy(modelHubAlias, {
 		defaultRouting: "inherit",
 		allowedProviders: ["modelhub"],

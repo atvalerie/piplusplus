@@ -25,7 +25,7 @@ Public references used for this audit:
 | Omitted model | Omitted subagent model defaults to `inherit`. | Omitted `agent.model` with default routing `inherit` uses the session model. | Match |
 | Explicit model | Claude accepts aliases/full IDs; per-invocation selection outranks defaults. | Pi++ accepts an exact authenticated `provider/id` or ID. | Compatible, provider-neutral extension |
 | Automatic routing | Claude chooses a suitable subagent/model within its product model set. | `auto` exists but is never implicit; the main model must request it. | Deliberately stricter/explicit |
-| Provider/vendor constraints | Claude Code is Anthropic-model based. | `allowedProviders`, `allowedFamilies`, and `allowedModels` intersect to hard-limit OpenCode Go, direct Anthropic, direct OpenAI, and ModelHub routing. | Pi++ extension |
+| Provider/vendor constraints | Claude Code is Anthropic-model based. | `allowedProviders`, `allowedFamilies`, and `allowedModels` intersect to hard-limit OpenCode Go, direct Anthropic, OpenAI API-key or ChatGPT/Codex OAuth, and ModelHub routing. | Pi++ extension |
 | Exact identity | Public behavior exposes selected model configuration. | Runtime also rejects output when the child reports a different exact model. | Pi++ hardening |
 | Tool restriction | Subagents can inherit or restrict tools. | Each worker can inherit all tools or receive an allowlist/read-only alias. | Match for allowlists |
 | Permission inheritance | Subagents inherit parent permission context; background work auto-denies prompts that cannot be shown. | Workers use the global Pi++ mode. Confirmation remains possible with UI; without UI it fails closed. | Intentional divergence |

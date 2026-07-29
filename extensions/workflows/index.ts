@@ -54,7 +54,7 @@ export const WorkflowSchema = Type.Object({
 		allowedProviders: Type.Optional(Type.Array(StringEnum(SUPPORTED_WORKFLOW_PROVIDERS), {
 			minItems: 1,
 			uniqueItems: true,
-			description: "Hard provider/source groups: opencode-go, anthropic, openai, or modelhub. ModelHub key aliases collapse to modelhub.",
+			description: "Hard provider/source groups: opencode-go, anthropic, openai, or modelhub. OpenAI includes the openai-codex ChatGPT OAuth provider; ModelHub key aliases collapse to modelhub.",
 		})),
 		allowedFamilies: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true, description: "Exact lowercase family values from workflow_models, such as openai or anthropic." })),
 		allowedModels: Type.Optional(Type.Array(Type.String(), { minItems: 1, uniqueItems: true })),
@@ -457,7 +457,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "workflow_models",
 		label: "Workflow Models",
-		description: "Return authenticated workflow models from OpenCode Go, Anthropic, OpenAI, and ModelHub with provider group, family, capability, context, output, and price metadata. Use before assigning workflow subagents when model choice matters.",
+		description: "Return authenticated workflow models from OpenCode Go, Anthropic, OpenAI (API key or openai-codex ChatGPT OAuth), and ModelHub with provider group, family, capability, context, output, and price metadata. Use before assigning workflow subagents when model choice matters.",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal, _update, ctx) {
 			await ctx.modelRegistry.refresh();
@@ -483,7 +483,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Recipes (diagnose, design, review, implement) are optional conveniences, not mandatory templates. Freely write a custom JavaScript workflow whenever it better matches the task, routing, or model strategy.",
 			"Use workflow_run only when fan-out, context isolation, loops, branching, or independent verification materially improves the task.",
-			"Interpret the user's model preferences semantically in whatever language they used and encode the decision in modelPolicy. Never infer policy from fixed keywords. Explicit user constraints are binding runtime allowlists. Workflows support provider groups opencode-go, anthropic, openai, and modelhub; use allowedProviders for the source and allowedFamilies for the underlying model vendor, intersecting them when both matter.",
+			"Interpret the user's model preferences semantically in whatever language they used and encode the decision in modelPolicy. Never infer policy from fixed keywords. Explicit user constraints are binding runtime allowlists. Workflows support provider groups opencode-go, anthropic, openai, and modelhub; the openai group includes both direct API-key OpenAI and the exact Pi provider openai-codex used by ChatGPT OAuth. Use allowedProviders for the source and allowedFamilies for the underlying model vendor, intersecting them when both matter.",
 			"Claude-compatible routing is the default: use modelPolicy.defaultRouting='inherit' and omit agent.model so workers inherit the current session model. Use agent.model for deliberate per-stage routing. Use 'auto' only when you intentionally delegate selection to Pi++'s capability/cost router.",
 			"Call workflow_models before choosing exact worker models or restricting a workflow to a family different from the session model. Under an allowlist, route exact eligible models or deliberately set defaultRouting='auto'; an ineligible inherited model fails closed.",
 			`Reusable profiles: ${PROFILE_NAMES.join(", ")}. Prefer profiles over ad-hoc role prose; their structured JSON contracts are validated and invalid output is retried.`,

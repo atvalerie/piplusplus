@@ -29,6 +29,10 @@ const directOpenAI = {
 	provider: "openai", id: "gpt-direct-test", name: "GPT Direct", reasoning: true,
 	contextWindow: 128_000, maxTokens: 16_000, cost: { input: 0, output: 0 },
 } as any;
+const codexOAuth = {
+	provider: "openai-codex", id: "gpt-codex-test", name: "GPT Codex OAuth", reasoning: true,
+	contextWindow: 128_000, maxTokens: 16_000, cost: { input: 0, output: 0 },
+} as any;
 const directAnthropic = {
 	provider: "anthropic", id: "claude-direct-test", name: "Claude Direct", reasoning: true,
 	contextWindow: 128_000, maxTokens: 16_000, cost: { input: 0, output: 0 },
@@ -157,4 +161,24 @@ test("all four supported provider groups pass the same runtime allowlist boundar
 		assert.equal(workflow.status, "completed", item.group);
 		assert.equal(workflow.agents[0].resolvedModel, `${item.model.provider}/${item.model.id}`, item.group);
 	}
+});
+
+test("an inherited openai-codex OAuth session satisfies the OpenAI provider and family policy", async () => {
+	const workflow = run(`return await agent("inherit Codex OAuth", { id: "codex" });`);
+	workflow.spec.modelPolicy = {
+		defaultRouting: "inherit",
+		allowedProviders: ["openai"],
+		allowedFamilies: ["openai"],
+		rationale: "Use only authenticated OpenAI models.",
+	};
+	let requestedProvider: string | undefined;
+	await createWorkflowController(workflow, [codexOAuth], codexOAuth, callbacks, {
+		runChildAgent: (async (_cwd: string, _agent: unknown, model: { provider: string; id: string }) => {
+			requestedProvider = model.provider;
+			return { exitCode: 0, output: "oauth result", stderr: "", usage: zeroUsage(), model: `${model.provider}/${model.id}`, stopReason: "stop" };
+		}) as any,
+	}).execute();
+	assert.equal(requestedProvider, "openai-codex");
+	assert.equal(workflow.status, "completed");
+	assert.equal(workflow.agents[0].resolvedModel, "openai-codex/gpt-codex-test");
 });
