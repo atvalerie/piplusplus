@@ -6,6 +6,7 @@ import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil
 import {
 	CLASSIFIER_ESTIMATED_INPUT_TOKENS,
 	CLASSIFIER_MAX_OUTPUT_TOKENS,
+	CLASSIFIER_TIMEOUT_MS,
 	COMMAND_CLASSIFIER_SYSTEM_PROMPT,
 	commandClassifierUserPrompt,
 	isAiCommandClassificationEligible,
@@ -82,7 +83,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			try {
 				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(candidate.model);
 				if (!auth.ok) continue;
-				const timeout = AbortSignal.timeout(10_000);
+				const timeout = AbortSignal.timeout(CLASSIFIER_TIMEOUT_MS);
 				const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
 				classifierCalls++;
 				lastClassifierModel = modelName;
@@ -98,7 +99,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 					reasoning: candidate.model.reasoning ? "minimal" : undefined,
 					cacheRetention: "none",
 					maxRetries: 0,
-					timeoutMs: 10_000,
+					timeoutMs: CLASSIFIER_TIMEOUT_MS,
 					sessionId: uuidv7(),
 				});
 				classifierCost += response.usage.cost.total;

@@ -12,7 +12,14 @@ export interface PiPlusPlusSettingsSection {
 	order?: number;
 }
 
-const sections = new Map<string, PiPlusPlusSettingsSection>();
+const SECTIONS_KEY = Symbol.for("piplusplus.settings-sections");
+type GlobalState = typeof globalThis & { [SECTIONS_KEY]?: Map<string, PiPlusPlusSettingsSection> };
+
+// Pi loads each top-level extension through a separate jiti module cache. Keep
+// the registry on globalThis so owner extensions and the control-center
+// extension see the same pages even when settings-service.ts is evaluated more
+// than once. Symbol.for also keeps independently evaluated copies on one key.
+const sections = (globalThis as GlobalState)[SECTIONS_KEY] ??= new Map<string, PiPlusPlusSettingsSection>();
 
 /**
  * Register an owner-controlled settings page. The owner remains responsible for

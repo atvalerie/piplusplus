@@ -21,6 +21,22 @@ test("Pi++ settings sections are ordered, replaceable, and safely disposable", (
 	assert.deepEqual(listPiPlusPlusSettingsSections(), []);
 });
 
+test("settings registry is shared across isolated module instances", async () => {
+	const owner = await import("../extensions/shared/settings-service.ts?instance=owner");
+	const hub = await import("../extensions/shared/settings-service.ts?instance=hub");
+	owner.clearPiPlusPlusSettingsSections();
+
+	const disposeOwner = owner.registerPiPlusPlusSettingsSection({ id: "shared", label: "Owner", description: "", summary: () => "owner", open: () => {} });
+	assert.deepEqual(hub.listPiPlusPlusSettingsSections().map((section) => section.label), ["Owner"]);
+
+	const disposeReplacement = hub.registerPiPlusPlusSettingsSection({ id: "shared", label: "Replacement", description: "", summary: () => "hub", open: () => {} });
+	disposeOwner();
+	assert.deepEqual(owner.listPiPlusPlusSettingsSections().map((section) => section.label), ["Replacement"], "a stale disposer from another module instance must preserve the replacement");
+
+	disposeReplacement();
+	assert.deepEqual(owner.listPiPlusPlusSettingsSections(), []);
+});
+
 test("control center registers all requested command aliases", () => {
 	const commands = new Map<string, unknown>();
 	piPlusPlusSettingsExtension({

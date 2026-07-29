@@ -6,6 +6,7 @@ export type CommandClassifierVerdict = "ALLOW" | "ASK";
 export const CLASSIFIER_MAX_COMMAND_BYTES = 16 * 1024;
 export const CLASSIFIER_ESTIMATED_INPUT_TOKENS = 1_000;
 export const CLASSIFIER_MAX_OUTPUT_TOKENS = 64;
+export const CLASSIFIER_TIMEOUT_MS = 20_000;
 /** At most one tenth of one US cent at catalog rates. */
 export const CLASSIFIER_MAX_ESTIMATED_COST_USD = 0.001;
 

@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
 	CLASSIFIER_MAX_COMMAND_BYTES,
+	CLASSIFIER_TIMEOUT_MS,
 	commandClassifierUserPrompt,
 	estimatedClassifierCost,
 	isAiCommandClassificationEligible,
@@ -59,6 +60,10 @@ test("AI command classification has deterministic eligibility barriers", () => {
 		"powershell -EncodedCommand AAAA",
 	]) assert.equal(isAiCommandClassificationEligible(command), false, command);
 	assert.equal(isAiCommandClassificationEligible("x".repeat(CLASSIFIER_MAX_COMMAND_BYTES + 1)), false);
+});
+
+test("classifier timeout allows twenty seconds", () => {
+	assert.equal(CLASSIFIER_TIMEOUT_MS, 20_000);
 });
 
 test("classifier output fails closed and command text is encoded as data", () => {
