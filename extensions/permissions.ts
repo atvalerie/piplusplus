@@ -1,6 +1,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { uuidv7 } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	CLASSIFIER_ESTIMATED_INPUT_TOKENS,
+	CLASSIFIER_MAX_OUTPUT_TOKENS,
+	COMMAND_CLASSIFIER_SYSTEM_PROMPT,
+	commandClassifierUserPrompt,
+	isAiCommandClassificationEligible,
+	parseCommandClassifierVerdict,
+	rankPermissionClassifierModels,
+} from "./permission-classifier.ts";
 import { acceptEditsAutoApproves, explainPermission } from "./workflows/permissions.ts";
 import { installPermissionService, removePermissionService, type GlobalPermissionMode, type PermissionService } from "./shared/permission-service.ts";
 import type { PermissionRequest } from "./workflows/types.ts";
@@ -11,7 +22,7 @@ const BASE_MODES: GlobalPermissionMode[] = ["manual", "accept-edits", "auto", "r
 const MODE_DESCRIPTIONS: Record<GlobalPermissionMode, string> = {
 	manual: "confirm edits and commands",
 	"accept-edits": "accept direct edits; confirm commands",
-	auto: "automatically allow proven low-risk operations",
+	auto: "deterministic checks plus a free/very-cheap AI command classifier",
 	"read-only": "block mutations",
 	plan: "read-only exploration followed by plan approval",
 	dangerous: "bypass all Pi++ tool confirmation",
@@ -23,21 +34,85 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 	const workflowArtifactRoot = path.join(getAgentDir(), "workflows", "artifacts");
 	let mode: GlobalPermissionMode = "manual";
 	let configuredMode: GlobalPermissionMode = "manual";
+	let aiClassifierEnabled = true;
 	const availableModes = new Set<GlobalPermissionMode>(BASE_MODES);
 	let currentContext: ExtensionContext | undefined;
 	let queue: Promise<void> = Promise.resolve();
 	const listeners = new Set<() => void>();
+	let classifierCalls = 0;
+	let classifierAllows = 0;
+	let classifierFailures = 0;
+	let classifierCost = 0;
+	let lastClassifierModel: string | undefined;
+	const classifierCache = new Map<string, boolean>();
 	try {
-		const value = JSON.parse(fs.readFileSync(configPath, "utf8"))?.mode as GlobalPermissionMode;
-		if ([...BASE_MODES, "plan"].includes(value)) configuredMode = value;
+		const value = JSON.parse(fs.readFileSync(configPath, "utf8")) as { mode?: GlobalPermissionMode; aiClassifier?: boolean };
+		if ([...BASE_MODES, "plan"].includes(value.mode as GlobalPermissionMode)) configuredMode = value.mode as GlobalPermissionMode;
+		if (typeof value.aiClassifier === "boolean") aiClassifierEnabled = value.aiClassifier;
 		if (availableModes.has(configuredMode)) mode = configuredMode;
 	} catch { /* defaults */ }
 
 	const persist = async () => {
 		await fs.promises.mkdir(path.dirname(configPath), { recursive: true });
 		const temp = `${configPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-		await fs.promises.writeFile(temp, `${JSON.stringify({ mode: configuredMode }, null, 2)}\n`, { mode: 0o600 });
+		await fs.promises.writeFile(temp, `${JSON.stringify({ mode: configuredMode, aiClassifier: aiClassifierEnabled }, null, 2)}\n`, { mode: 0o600 });
 		await fs.promises.rename(temp, configPath);
+	};
+
+	const rememberClassification = (key: string, allow: boolean) => {
+		classifierCache.delete(key);
+		classifierCache.set(key, allow);
+		while (classifierCache.size > 256) classifierCache.delete(classifierCache.keys().next().value!);
+	};
+
+	const classifyCommand = async (command: string, ctx: ExtensionContext): Promise<boolean> => {
+		if (!aiClassifierEnabled || !isAiCommandClassificationEligible(command)) return false;
+		const estimatedInputTokens = CLASSIFIER_ESTIMATED_INPUT_TOKENS + Math.ceil(Buffer.byteLength(command, "utf8") / 3);
+		const candidates = rankPermissionClassifierModels(ctx.modelRegistry.getAvailable(), estimatedInputTokens).slice(0, 2);
+		for (const candidate of candidates) {
+			const modelName = `${candidate.model.provider}/${candidate.model.id}`;
+			const cacheKey = `${modelName}\0${ctx.cwd}\0${command}`;
+			const cached = classifierCache.get(cacheKey);
+			if (cached !== undefined) {
+				classifierCache.delete(cacheKey);
+				classifierCache.set(cacheKey, cached);
+				return cached;
+			}
+			try {
+				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(candidate.model);
+				if (!auth.ok) continue;
+				const timeout = AbortSignal.timeout(10_000);
+				const signal = ctx.signal ? AbortSignal.any([ctx.signal, timeout]) : timeout;
+				classifierCalls++;
+				lastClassifierModel = modelName;
+				const response = await completeSimple(candidate.model, {
+					systemPrompt: COMMAND_CLASSIFIER_SYSTEM_PROMPT,
+					messages: [{ role: "user", content: [{ type: "text", text: commandClassifierUserPrompt(command) }], timestamp: Date.now() }],
+				}, {
+					apiKey: auth.apiKey,
+					headers: auth.headers,
+					env: auth.env,
+					signal,
+					maxTokens: CLASSIFIER_MAX_OUTPUT_TOKENS,
+					reasoning: candidate.model.reasoning ? "minimal" : undefined,
+					cacheRetention: "none",
+					maxRetries: 0,
+					timeoutMs: 10_000,
+					sessionId: uuidv7(),
+				});
+				classifierCost += response.usage.cost.total;
+				const text = response.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+				const verdict = parseCommandClassifierVerdict(text);
+				if (!verdict) { classifierFailures++; continue; }
+				const allow = verdict === "ALLOW";
+				if (allow) classifierAllows++;
+				rememberClassification(cacheKey, allow);
+				return allow;
+			} catch {
+				classifierFailures++;
+			}
+		}
+		return false;
 	};
 
 	const service: PermissionService = {
@@ -67,6 +142,9 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			if (mode === "accept-edits") {
 				if (acceptEditsAutoApproves(request, decision) && !options?.forcePrompt) return true;
 			} else if (decision.automatic && !options?.forcePrompt) return decision.allow;
+			if (mode === "auto" && ctx && !options?.forcePrompt && request.toolName === "bash" && decision.risk === "caution") {
+				if (await classifyCommand(String(request.input.command ?? ""), ctx)) return true;
+			}
 			if (!ctx?.hasUI) return false;
 			const input = request.toolName === "bash" ? String(request.input.command ?? "") : JSON.stringify(request.input, null, 2);
 			let allowed = false;
@@ -93,6 +171,19 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 	});
 
 	const selectMode = async (requestedText: string, ctx: ExtensionContext) => {
+		const classifierCommand = requestedText.trim().match(/^classifier(?:\s+(on|off|status))?$/i);
+		if (classifierCommand) {
+			const action = classifierCommand[1]?.toLowerCase() ?? "status";
+			if (action === "on" || action === "off") {
+				aiClassifierEnabled = action === "on";
+				classifierCache.clear();
+				await persist();
+			}
+			const candidate = rankPermissionClassifierModels(ctx.modelRegistry.getAvailable())[0];
+			const selected = candidate ? `${candidate.model.provider}/${candidate.model.id}${candidate.explicitlyFree ? " · free" : ` · estimated $${candidate.estimatedCostUsd.toFixed(6)}/call`}` : "none available";
+			ctx.ui.notify(`Auto command classifier: ${aiClassifierEnabled ? "on" : "off"} · model ${selected} · ${classifierAllows}/${classifierCalls} allowed · $${classifierCost.toFixed(6)}${classifierFailures ? ` · ${classifierFailures} failure(s)` : ""}${lastClassifierModel ? ` · last ${lastClassifierModel}` : ""}`, "info");
+			return;
+		}
 		const modes = [...availableModes];
 		const requested = requestedText.trim() as GlobalPermissionMode;
 		let selected: GlobalPermissionMode | undefined = modes.includes(requested) ? requested : undefined;

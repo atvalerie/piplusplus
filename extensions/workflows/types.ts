@@ -131,13 +131,19 @@ export interface AgentState {
 	flags: string[];
 	usage: UsageStats;
 	toolCalls: Array<{ name: string; args?: unknown; error?: boolean }>;
-	/** Complete assistant/tool messages emitted by all attempts. */
-	messages: Message[];
-	/** Bounded raw Pi JSON-mode stream, preserving reasoning and tool result events when emitted. */
-	events: Array<{ at: number; attempt: number; event: unknown }>;
+	/** Counts omitted after the bounded tool-call summary fills. */
+	droppedToolCalls?: number;
+	/** Legacy pre-v7 transcript fields. New runs keep these empty to avoid duplicating every Pi event/message. */
+	messages?: Message[];
+	events?: Array<{ at: number; attempt: number; event: unknown }>;
+	/** Lightweight diagnostics retained instead of complete raw transcripts. */
+	observedMessages?: number;
+	observedEvents?: number;
 	logs: AgentLogEntry[];
 	droppedLogEvents?: number;
 	droppedEvents?: number;
+	/** Set on reload-only state when large values were clipped; disables unsafe cache reuse. */
+	persistenceTruncated?: boolean;
 	attempt: number;
 	nextRetryAt?: number;
 	/** Runtime-only fields are omitted by JSON persistence. */

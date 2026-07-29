@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { hasVerificationSection, writeWorkflowArtifact } from "../extensions/workflows/artifact.ts";
+import { hasVerificationSection, workflowRunForPersistence, writeWorkflowArtifact } from "../extensions/workflows/artifact.ts";
 import { WorkflowBrowser } from "../extensions/workflows/tui.ts";
 import { zeroUsage, type AgentState, type WorkflowRun } from "../extensions/workflows/types.ts";
 
@@ -75,7 +75,7 @@ test("unverified workflows produce one consolidated parent-agent handoff", async
 	const artifactPath = await writeWorkflowArtifact(workflow, directory);
 	assert.equal(artifactPath, path.join(directory, "wf_test.json"));
 	const artifact = JSON.parse(fs.readFileSync(artifactPath!, "utf8"));
-	assert.equal(artifact.schemaVersion, 6);
+	assert.equal(artifact.schemaVersion, 7);
 	assert.equal(artifact.kind, "piplusplus.workflow.state");
 	assert.equal(artifact.workflow.modelPolicy.defaultRouting, "inherit");
 	assert.equal(artifact.execution.verification.present, false);
@@ -84,16 +84,70 @@ test("unverified workflows produce one consolidated parent-agent handoff", async
 	assert.equal(artifact.agents[0].prompt, "Inspect architecture");
 	assert.equal(artifact.agents[0].requestedThinking, undefined);
 	assert.equal(artifact.agents[0].output, "Architecture output");
-	assert.equal(artifact.agents[0].rawOutput, "Architecture output");
+	assert.equal(artifact.agents[0].rawOutput, undefined);
+	assert.equal(artifact.agents[0].rawOutputStorage.sameAs, "output");
 	assert.deepEqual(artifact.agents[0].scanFindings, []);
 	assert.equal(artifact.agents[0].logs.length, 2);
-	assert.equal(artifact.agents[0].rawEvents[0].event.message.content[0].text, "Architecture output");
+	assert.equal(artifact.agents[0].diagnostics.legacyRawEventsRetained, 1);
+	assert.equal(artifact.agents[0].rawEvents, undefined);
 	assert.equal(artifact.logs.length, 2);
 	assert.deepEqual(fs.readdirSync(directory), ["wf_test.json"]);
 	fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("verification workflows still produce the complete artifact", async () => {
+test("small structured results are represented once", async () => {
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-artifact-"));
+	const value = { status: "completed", findings: ["one"] };
+	const text = JSON.stringify(value);
+	const workflow = run([agent({ output: text, rawOutput: text, structuredOutput: value })]);
+	const artifactPath = await writeWorkflowArtifact(workflow, directory);
+	const artifact = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+	assert.deepEqual(artifact.agents[0].structuredOutput, value);
+	assert.equal(artifact.agents[0].output, undefined);
+	assert.equal(artifact.agents[0].outputStorage.representedBy, "structuredOutput");
+	assert.equal(artifact.agents[0].rawOutputStorage.sameAs, "structuredOutput");
+	fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("large and duplicate worker payloads stay out of the compact JSON index", async () => {
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-artifact-"));
+	const large = "large-result-line\n".repeat(30_000);
+	const item = agent({
+		output: large,
+		rawOutput: large,
+		resultHash: "result-hash",
+		messages: [{ role: "assistant", content: [{ type: "text", text: large } as never] } as never],
+		events: [{ at: 3, attempt: 1, event: { type: "message_end", message: { content: large } } }],
+	});
+	const workflow = run([item]);
+	workflow.fullResult = large;
+	workflow.result = large.slice(0, 50_000);
+	const artifactPath = await writeWorkflowArtifact(workflow, directory);
+	const serialized = fs.readFileSync(artifactPath, "utf8");
+	const artifact = JSON.parse(serialized);
+
+	assert.ok(Buffer.byteLength(serialized) < 250_000, `compact artifact was ${Buffer.byteLength(serialized)} bytes`);
+	assert.equal(artifact.agents[0].rawOutput, undefined);
+	assert.equal(artifact.agents[0].diagnostics.legacyMessagesRetained, 1);
+	assert.equal(artifact.agents[0].diagnostics.legacyRawEventsRetained, 1);
+	assert.equal(artifact.agents[0].outputStorage.truncated, true);
+	assert.equal(fs.readFileSync(artifact.agents[0].outputStorage.ref, "utf8"), large);
+	assert.equal(fs.readFileSync(artifact.summaryStorage.ref, "utf8"), large);
+	assert.equal(artifact.agents[0].outputStorage.ref, artifact.summaryStorage.ref);
+	assert.equal(fs.readdirSync(path.dirname(artifact.summaryStorage.ref)).length, 1);
+	assert.doesNotMatch(serialized, /message_end/);
+
+	const persisted = workflowRunForPersistence(workflow);
+	assert.equal(persisted.fullResult, undefined);
+	assert.equal(persisted.agents[0].rawOutput, undefined);
+	assert.deepEqual(persisted.agents[0].messages, []);
+	assert.deepEqual(persisted.agents[0].events, []);
+	assert.equal(persisted.agents[0].resultHash, undefined);
+	assert.equal(persisted.agents[0].persistenceTruncated, true);
+	fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("verification workflows remain represented in the compact artifact", async () => {
 	const directory = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-artifact-"));
 	const workflow = run([agent(), agent({ id: "verifier", label: "Verifier", phase: "Verification", kind: "general" })]);
 	assert.equal(hasVerificationSection(workflow), true);

@@ -6,7 +6,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { Text, type Terminal } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { workflowApprovalSummary } from "./approval.ts";
-import { writeWorkflowArtifact } from "./artifact.ts";
+import { workflowRunForPersistence, writeWorkflowArtifact } from "./artifact.ts";
 import { getPermissionService } from "../shared/permission-service.ts";
 import { installWorkflowDockService, removeWorkflowDockService, type WorkflowDockService } from "../shared/workflow-dock-service.ts";
 import { migrateWorkflowRun } from "./migration.ts";
@@ -38,7 +38,7 @@ import { aggregateUsage, type AgentState, type PermissionRequest, type ThinkingL
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 const WIDGET_ID = "piplusplus-workflows";
-const MAX_RUN_LOG_EVENTS = 100_000;
+const MAX_RUN_LOG_EVENTS = 5_000;
 const retentionDays = Math.max(1, Math.min(365, Number.parseInt(process.env.PIPLUSPLUS_WORKFLOW_RETENTION_DAYS ?? "30", 10) || 30));
 
 export const WorkflowSchema = Type.Object({
@@ -104,6 +104,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	const artifactQueues = new Map<string, Promise<void>>();
 	const savedWorkflows = new Map<string, SavedWorkflow>();
 	const registeredSavedCommands = new Set<string>();
+	const restoredArtifactRefresh = new Set<string>();
 	const stateDir = path.join(getAgentDir(), "workflows", "runs");
 	const artifactDir = path.join(getAgentDir(), "workflows", "artifacts");
 	let ctxNow: ExtensionContext | undefined;
@@ -179,10 +180,11 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	const persistNow = async (run: WorkflowRun) => {
 		try {
 			await fs.promises.mkdir(stateDir, { recursive: true });
-			const clean = JSON.parse(JSON.stringify(run, (key, value) => key === "process" ? undefined : value));
+			const clean = workflowRunForPersistence(run);
 			const target = path.join(stateDir, `${run.id}.json`);
 			const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-			await fs.promises.writeFile(temp, JSON.stringify(clean, null, 2), { mode: 0o600 });
+			// Reload state is machine-owned and intentionally compact; the readable artifact is separate.
+			await fs.promises.writeFile(temp, JSON.stringify(clean), { mode: 0o600 });
 			await fs.promises.rename(temp, target);
 		} catch { /* UI state persistence is best effort */ }
 	};
@@ -225,8 +227,12 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	};
 
 	const changed = (run: WorkflowRun, event: string, agent?: AgentState) => {
-		if (run.logs.length < MAX_RUN_LOG_EVENTS) run.logs.push({ at: Date.now(), event, phase: run.currentPhase, status: run.status, agentId: agent?.id, agentStatus: agent?.status });
-		else run.droppedLogEvents = (run.droppedLogEvents ?? 0) + 1;
+		// Progress is already visible through live state/events. Persisting one log row per
+		// streamed Pi event was pure duplication and the main source of million-line files.
+		if (event !== "agent_progress") {
+			if (run.logs.length < MAX_RUN_LOG_EVENTS) run.logs.push({ at: Date.now(), event, phase: run.currentPhase, status: run.status, agentId: agent?.id, agentStatus: agent?.status });
+			else run.droppedLogEvents = (run.droppedLogEvents ?? 0) + 1;
+		}
 		run.usage = aggregateUsage(run.agents);
 		const terminal = ["completed", "completed_with_flags", "budget_exhausted", "failed", "stopped"].includes(run.status);
 		schedulePersist(run, terminal);
@@ -408,7 +414,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		await promise;
 		signal?.removeEventListener("abort", abort);
 		const handoff = run.artifactPath ? `\n\nRead the complete workflow JSON before reporting:\n${run.artifactPath}` : "";
-		return { content: [{ type: "text" as const, text: `${run.result ?? run.error ?? "No result"}\n\n${run.status} · ${summary(run)}\n${workflowPolicyContext(run.spec.modelPolicy)}${handoff}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath, run } };
+		return { content: [{ type: "text" as const, text: `${run.result ?? run.error ?? "No result"}\n\n${run.status} · ${summary(run)}\n${workflowPolicyContext(run.spec.modelPolicy)}${handoff}` }], details: { runId: run.id, status: run.status, artifactPath: run.artifactPath } };
 	};
 
 	const refreshSavedWorkflowCommands = async (ctx: ExtensionContext): Promise<void> => {
@@ -742,8 +748,13 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			for (const directory of [stateDir, artifactDir]) {
 				await fs.promises.mkdir(directory, { recursive: true });
 				for (const file of await fs.promises.readdir(directory)) {
-					if (!file.endsWith(".json")) continue;
-					try { const stat = await fs.promises.stat(path.join(directory, file)); if (stat.mtimeMs < cutoff) await fs.promises.unlink(path.join(directory, file)); } catch {}
+					const target = path.join(directory, file);
+					try {
+						const stat = await fs.promises.stat(target);
+						if (stat.mtimeMs >= cutoff) continue;
+						if (stat.isDirectory() && file.endsWith(".data")) await fs.promises.rm(target, { recursive: true, force: true });
+						else if (stat.isFile() && file.endsWith(".json")) await fs.promises.unlink(target);
+					} catch {}
 				}
 			}
 			for (const file of await fs.promises.readdir(stateDir)) {
@@ -755,6 +766,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 						run.status = "stopped";
 						run.finishedAt = Date.now();
 						run.error = "Interrupted by session restart or reload; this same-session run can be resumed.";
+						restoredArtifactRefresh.add(run.id);
 					}
 					run.logs ??= [];
 					for (const agent of run.agents) {
@@ -769,7 +781,13 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			}
 		} catch { /* best effort */ }
 		await refreshSavedWorkflowCommands(ctx);
-		for (const run of runs.values()) scheduleArtifact(run, true);
+		for (const run of runs.values()) {
+			// Keep finalized artifacts (and their full-result sidecar refs) immutable across
+			// reloads; only repair a missing index or record an interrupted live run.
+			const artifactPath = path.join(artifactDir, `${run.id}.json`);
+			if (restoredArtifactRefresh.has(run.id) || !fs.existsSync(artifactPath)) scheduleArtifact(run, true);
+		}
+		restoredArtifactRefresh.clear();
 		refreshUi();
 	});
 

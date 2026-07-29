@@ -133,8 +133,15 @@ export function classifyPathAccess(
 	if (operation === "read") {
 		for (const root of options.artifactRoots ?? []) {
 			const artifact = resolvedPair(root, ".");
-			if (inside(artifact.cwdRequested, pair.requested) && inside(artifact.cwdResolved, pair.resolved) && path.extname(pair.requested).toLowerCase() === ".json") {
-				return { access: "allow", requestedPath: pair.requested, resolvedPath: pair.resolved, explanation: "Read the workflow's JSON artifact." };
+			const requestedInside = inside(artifact.cwdRequested, pair.requested);
+			const resolvedInside = inside(artifact.cwdResolved, pair.resolved);
+			const relative = path.relative(artifact.cwdRequested, pair.requested);
+			const [payloadDirectory] = relativeSegments(artifact.cwdRequested, pair.requested);
+			const extension = path.extname(pair.requested).toLowerCase();
+			const isArtifactIndex = extension === ".json" && !relative.includes(path.sep);
+			const isArtifactPayload = extension === ".txt" && Boolean(payloadDirectory?.endsWith(".data"));
+			if (requestedInside && resolvedInside && (isArtifactIndex || isArtifactPayload)) {
+				return { access: "allow", requestedPath: pair.requested, resolvedPath: pair.resolved, explanation: isArtifactIndex ? "Read the workflow's JSON artifact." : "Read a large payload referenced by a workflow artifact." };
 			}
 		}
 	}

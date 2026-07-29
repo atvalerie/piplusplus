@@ -14,9 +14,8 @@ import { zeroUsage } from "./types.ts";
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 const MAX_STREAM_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 1024 * 1024;
-const MAX_LOG_EVENTS = 100_000;
-const MAX_TOOL_CALLS = 10_000;
-const MAX_RAW_EVENTS = 50_000;
+const MAX_LOG_EVENTS = 2_000;
+const MAX_TOOL_CALLS = 500;
 const CLOSED_PERMISSION_PIPE_CODES = new Set(["EPIPE", "ERR_STREAM_DESTROYED", "ERR_STREAM_WRITE_AFTER_END"]);
 
 export function isClosedPermissionPipeError(error: unknown): boolean {
@@ -117,6 +116,15 @@ export function createTurnLimitGuard(maxTurns: number | undefined, terminate: ()
 	};
 }
 
+function compactToolArgs(value: unknown): unknown {
+	if (value === undefined) return undefined;
+	let json: string;
+	try { json = JSON.stringify(value); }
+	catch { return { unavailable: true }; }
+	if (Buffer.byteLength(json, "utf8") <= 8 * 1024) return value;
+	return { truncated: true, bytes: Buffer.byteLength(json, "utf8"), preview: `${json.slice(0, 8 * 1024)}…` };
+}
+
 export async function runChildAgent(
 	cwd: string,
 	agent: AgentState,
@@ -192,15 +200,14 @@ export async function runChildAgent(
 			if (!line.trim()) return;
 			let event: any;
 			try { event = JSON.parse(line); } catch { addLog({ at: Date.now(), type: "unparsed_output", message: line.slice(0, 8_192) }); return; }
-			if (agent.events.length < MAX_RAW_EVENTS) agent.events.push({ at: Date.now(), attempt: agent.attempt, event });
-			else agent.droppedEvents = (agent.droppedEvents ?? 0) + 1;
-			addLog({ at: Date.now(), type: event.type ?? "event", tool: event.toolName });
+			agent.observedEvents = (agent.observedEvents ?? 0) + 1;
 			if (event.type === "agent_settled") {
 				settled = true;
 				setTimeout(() => { if (agent.process === proc) terminateProcessTree(proc); }, 100).unref();
 			}
 			if (event.type === "tool_execution_start" || event.type === "tool_call_start") {
-				if (agent.toolCalls.length < MAX_TOOL_CALLS) agent.toolCalls.push({ name: event.toolName ?? "tool", args: event.args });
+				if (agent.toolCalls.length < MAX_TOOL_CALLS) agent.toolCalls.push({ name: event.toolName ?? "tool", args: compactToolArgs(event.args) });
+				else agent.droppedToolCalls = (agent.droppedToolCalls ?? 0) + 1;
 				onUpdate();
 			}
 			if (event.type === "tool_execution_end" && event.isError && agent.toolCalls.length) {
@@ -210,7 +217,7 @@ export async function runChildAgent(
 			if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
 				const message = event.message as Message;
 				messages.push(message);
-				agent.messages.push(message);
+				agent.observedMessages = (agent.observedMessages ?? 0) + 1;
 				if (message.role === "assistant") {
 					usage.turns++;
 					agent.usage.turns++;

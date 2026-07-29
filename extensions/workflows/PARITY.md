@@ -53,7 +53,7 @@ Public references used for this audit:
 - Per-stage runtime JSON Schema validation returning real guest values.
 - Explicit raw-versus-scanned output audit trail.
 - Deterministic result-cache identity and downstream invalidation.
-- Continuously updated schema-v6 artifacts with model, permission, usage, retry, scan, cache, and budget evidence.
+- Continuously updated schema-v7 compact indexes with model, permission, usage, retry, scan, cache, and budget evidence; large exact results use content-addressed sidecars instead of repeated transcripts.
 - Workflow-wide token/cost/agent budgets in interactive and background operation.
 
 ## What remains behind Claude Code

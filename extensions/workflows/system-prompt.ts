@@ -21,7 +21,7 @@ export function buildWorkflowSystemInstructions(options: {
 		`The user's persistent aggregate-budget mode is ${options.budgetPolicy}. It overrides budgets emitted by the orchestrator. In off mode omit budgets; in custom mode the runtime applies the user's limits. Aggregate token/cost limits stop new workers after reported exhaustion but already-running parallel workers may overrun them.`,
 		`The user's persistent worker-turn policy is ${options.maxTurnsPolicy}. It overrides every maxTurns emitted in the script. In off mode omit maxTurns because workers are unlimited; in custom mode the runtime applies the user's limit to every worker; only model mode accepts per-agent maxTurns from the orchestrator.`,
 		"Declare size (small <5, medium <15, large <50, unrestricted). Avoid overlapping parallel edits. writePaths bounds direct edits, but unconfined shell/custom mutations require explicit user acknowledgement.",
-		"Workflow launch approval, persistent trust, and worker tool permissions are separate. The workflow artifact is the source of truth for active modelPolicy, requested/resolved/reported identities, raw/scanned output, cache state, usage, errors, flags, and final handoff. Read it before reporting.",
+		"Workflow approval, trust, and worker permissions are separate. The compact artifact index is the source of truth for policy, model identities, output refs, cache, usage, errors, flags, and handoff. Read it before reporting; follow a payload ref only if its preview is insufficient.",
 	].join("\n\n");
 }
 

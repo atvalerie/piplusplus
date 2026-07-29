@@ -72,7 +72,13 @@ test("path policy resolves traversal, protected paths, artifact exceptions, and 
 		assert.equal(classifyPathAccess(repo, "package-lock.json", "edit").access, "ask");
 		const artifact = path.join(artifacts, "wf.json");
 		const other = path.join(artifacts, "notes.txt");
+		const payloadDirectory = path.join(artifacts, "wf.data");
+		fs.mkdirSync(payloadDirectory);
+		const payload = path.join(payloadDirectory, "hash.txt");
+		const nestedJson = path.join(payloadDirectory, "unrelated.json");
 		assert.equal(classifyPathAccess(repo, artifact, "read", { artifactRoots: [artifacts] }).access, "allow");
+		assert.equal(classifyPathAccess(repo, payload, "read", { artifactRoots: [artifacts] }).access, "allow");
+		assert.equal(classifyPathAccess(repo, nestedJson, "read", { artifactRoots: [artifacts] }).access, "ask");
 		assert.equal(classifyPathAccess(repo, other, "read", { artifactRoots: [artifacts] }).access, "ask");
 	} finally {
 		fs.rmSync(repo, { recursive: true, force: true });

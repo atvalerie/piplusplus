@@ -23,10 +23,10 @@ export default function (pi: ExtensionAPI) {
 ## Included resources
 
 - `auto-update.ts` — periodically updates unpinned Pi packages.
-- `permissions.ts` — global manual, accept-edits, conservative auto, read-only, optional plan, and session-only dangerous modes with explanatory confirmation and a dependency service for other extensions.
+- `permissions.ts` / `permission-classifier.ts` — global manual, accept-edits, conservative auto, read-only, optional plan, and session-only dangerous modes with explanatory confirmation and a dependency service for other extensions. Auto mode keeps deterministic safety barriers and can use an authenticated explicitly-free or sub-$0.001 isolated model call to classify otherwise uncertain shell commands; failures always fall back to confirmation.
 - `plan-mode.ts` / `shared/plan-mode.ts` — standalone Claude-style `plan` permission mode, read-only planning, auto/manual execution acceptance, optional native compaction, exact plan handoff, and persistent progress.
 - `shared/permission-service.ts` — shared dependency contract used by the permission extension and consumers such as workflows.
-- `workflows.ts` / `workflows/` — audited diagnose/design/review/implement recipes plus sandboxed custom JavaScript workflows, reusable specialist profiles, structured-output validation, semantic approval gates, scoped direct writes, independently model-routed workers, retries, live usage, complete JSON artifacts, explicit model-family enforcement, neutral optional auto-routing, and a keyboard-focusable bottom workflow dock.
+- `workflows.ts` / `workflows/` — audited diagnose/design/review/implement recipes plus sandboxed custom JavaScript workflows, reusable specialist profiles, structured-output validation, semantic approval gates, scoped direct writes, independently model-routed workers, retries, live usage, compact JSON artifact indexes with large-payload sidecars, explicit model-family enforcement, neutral optional auto-routing, and a keyboard-focusable bottom workflow dock.
 - `modelhub-provider.ts` — live ModelHub catalog and OpenAI/Anthropic-compatible provider registration.
 - `secrets.ts` / `shared/secret-service.ts` — reusable masked secret setup and owner-only atomic local storage dependency.
 - `telemetry-core.ts` — provider-neutral telemetry registry and refresh lifecycle.
