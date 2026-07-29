@@ -9,6 +9,7 @@ import { workflowApprovalSummary } from "./approval.ts";
 import { workflowRunForPersistence, writeWorkflowArtifact } from "./artifact.ts";
 import { getPermissionService } from "../shared/permission-service.ts";
 import { installWorkflowDockService, removeWorkflowDockService, type WorkflowDockService } from "../shared/workflow-dock-service.ts";
+import { registerPiPlusPlusSettingsSection } from "../shared/settings-service.ts";
 import { migrateWorkflowRun } from "./migration.ts";
 import { filterSupportedWorkflowModels, modelCatalogText, serializeModels, SUPPORTED_WORKFLOW_PROVIDERS } from "./models.ts";
 import { explainPermission, isPathWithinWriteScope, mutationOverlapsWriteScopes, scopedToolRequiresExplicitApproval } from "./permissions.ts";
@@ -39,7 +40,9 @@ import { aggregateUsage, type AgentState, type PermissionRequest, type ThinkingL
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 const WIDGET_ID = "piplusplus-workflows";
 const MAX_RUN_LOG_EVENTS = 5_000;
-const retentionDays = Math.max(1, Math.min(365, Number.parseInt(process.env.PIPLUSPLUS_WORKFLOW_RETENTION_DAYS ?? "30", 10) || 30));
+const environmentRetentionDays = process.env.PIPLUSPLUS_WORKFLOW_RETENTION_DAYS === undefined
+	? undefined
+	: Math.max(1, Math.min(365, Number.parseInt(process.env.PIPLUSPLUS_WORKFLOW_RETENTION_DAYS, 10) || 30));
 
 export const WorkflowSchema = Type.Object({
 	name: Type.String({ description: "Short workflow name" }),
@@ -318,7 +321,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	};
 
 	async function approve(spec: WorkflowSpec, ctx: ExtensionContext): Promise<WorkflowSpec | undefined> {
-		if (!ctx.hasUI) return headlessWorkflowLaunchAllowed() ? spec : undefined;
+		if (!ctx.hasUI) return headlessWorkflowLaunchAllowed(process.env.PIPLUSPLUS_WORKFLOW_HEADLESS_POLICY ?? workflowSettings.headlessPolicy) ? spec : undefined;
 		while (true) {
 			try {
 				if (await isWorkflowTrusted(spec, ctx.cwd, getAgentDir())) return spec;
@@ -545,18 +548,22 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		theme.fg(message.content.includes(" failed") ? "error" : message.content.includes("completed_with_flags") || message.content.includes("budget_exhausted") ? "warning" : "success", message.content), 0, 0,
 	));
 
-	pi.registerCommand("workflows", {
-		description: "Browse workflows, phases, subagent prompts, tools, models, errors, and results",
-		handler: async (args, ctx) => {
+	const handleWorkflowsCommand = async (args: string, ctx: ExtensionContext) => {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			const [action, id, agentId] = parts;
 			if (action === "triggers") {
-				if (id !== "on" && id !== "off" && id !== "status") {
+				let value = id;
+				if (!value) {
+					const selected = await ctx.ui.select(`Literal interactive workflow triggers · ${workflowSettings.triggersEnabled ? "on" : "off"}`, ["On", "Off", "Back"]);
+					if (!selected || selected === "Back") return;
+					value = selected.toLowerCase();
+				}
+				if (value !== "on" && value !== "off" && value !== "status") {
 					ctx.ui.notify("Usage: /workflows triggers on|off|status", "warning");
 					return;
 				}
-				if (id !== "status") {
-					workflowSettings = { ...workflowSettings, triggersEnabled: id === "on" };
+				if (value !== "status") {
+					workflowSettings = { ...workflowSettings, triggersEnabled: value === "on" };
 					if (!workflowSettings.triggersEnabled) pendingUltracodeTriggers.length = 0;
 					try { await saveWorkflowSettings(getAgentDir(), workflowSettings); }
 					catch (error) { ctx.ui.notify(`Could not save workflow trigger setting: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
@@ -565,12 +572,18 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (action === "ultracode-effort") {
-				if (id !== "one-prompt" && id !== "session" && id !== "status") {
+				let value = id;
+				if (!value) {
+					const selected = await ctx.ui.select(`Ultracode effort mode · ${workflowSettings.ultracodeEffortMode}`, ["One prompt", "Whole session", "Back"]);
+					if (!selected || selected === "Back") return;
+					value = selected === "One prompt" ? "one-prompt" : "session";
+				}
+				if (value !== "one-prompt" && value !== "session" && value !== "status") {
 					ctx.ui.notify("Usage: /workflows ultracode-effort one-prompt|session|status", "warning");
 					return;
 				}
-				if (id !== "status") {
-					workflowSettings = { ...workflowSettings, ultracodeEffortMode: id };
+				if (value !== "status") {
+					workflowSettings = { ...workflowSettings, ultracodeEffortMode: value };
 					try { await saveWorkflowSettings(getAgentDir(), workflowSettings); }
 					catch (error) { ctx.ui.notify(`Could not save ultracode effort setting: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
 				}
@@ -694,7 +707,52 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			await openWorkflowDock(ctx);
-		},
+	};
+
+	pi.registerCommand("workflows", {
+		description: "Browse workflows and configure trigger, effort, budget, and worker-turn settings",
+		handler: handleWorkflowsCommand,
+	});
+
+	const openWorkflowSettings = async (ctx: ExtensionContext) => {
+		while (ctx.hasUI) {
+			const triggers = `Literal ultracode triggers · ${workflowSettings.triggersEnabled ? "on" : "off"}`;
+			const effort = `Ultracode effort · ${workflowSettings.ultracodeEffortMode}`;
+			const budgets = `Aggregate budgets · ${workflowSettings.budgetMode}`;
+			const maxTurns = `Worker max turns · ${workflowSettings.maxTurnsMode}`;
+			const retention = `Artifact retention · ${environmentRetentionDays ?? workflowSettings.retentionDays} days${environmentRetentionDays === undefined ? "" : " · environment override"}`;
+			const headless = `Headless launch · ${process.env.PIPLUSPLUS_WORKFLOW_HEADLESS_POLICY ?? workflowSettings.headlessPolicy}${process.env.PIPLUSPLUS_WORKFLOW_HEADLESS_POLICY === undefined ? "" : " · environment override"}`;
+			const selected = await ctx.ui.select("Pi++ workflow settings", [triggers, effort, budgets, maxTurns, retention, headless, "Open workflow browser", "Back"]);
+			if (!selected || selected === "Back") return;
+			if (selected === triggers) await handleWorkflowsCommand("triggers", ctx);
+			else if (selected === effort) await handleWorkflowsCommand("ultracode-effort", ctx);
+			else if (selected === budgets) await handleWorkflowsCommand("budget", ctx);
+			else if (selected === maxTurns) await handleWorkflowsCommand("max-turns", ctx);
+			else if (selected === retention) {
+				const entered = await ctx.ui.input("Workflow artifact retention in days", "1-365");
+				if (entered === undefined) continue;
+				const days = Number(entered.trim());
+				if (!Number.isInteger(days) || days < 1 || days > 365) { ctx.ui.notify("Retention must be an integer from 1 to 365 days.", "error"); continue; }
+				const next = { ...workflowSettings, retentionDays: days };
+				try { await saveWorkflowSettings(getAgentDir(), next); workflowSettings = next; }
+				catch (error) { ctx.ui.notify(`Could not save workflow retention: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+			} else if (selected === headless) {
+				const value = await ctx.ui.select("Headless workflow launch policy", ["Deny · fail closed", "Allow · compatibility default", "Back"]);
+				if (!value || value === "Back") continue;
+				const next = { ...workflowSettings, headlessPolicy: value.startsWith("Deny") ? "deny" as const : "allow" as const };
+				try { await saveWorkflowSettings(getAgentDir(), next); workflowSettings = next; }
+				catch (error) { ctx.ui.notify(`Could not save headless launch policy: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+			}
+			else await handleWorkflowsCommand("", ctx);
+		}
+	};
+	const unregisterSettings = registerPiPlusPlusSettingsSection({
+		id: "workflows",
+		label: "Workflows",
+		description: "Triggers, ultracode effort, aggregate budgets, worker turn limits, and workflow browser",
+		order: 20,
+		summary: () => `triggers ${workflowSettings.triggersEnabled ? "on" : "off"} · budget ${workflowSettings.budgetMode} · turns ${workflowSettings.maxTurnsMode} · retain ${environmentRetentionDays ?? workflowSettings.retentionDays}d`,
+		open: openWorkflowSettings,
 	});
 
 	pi.on("input", (event) => {
@@ -744,7 +802,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 			notify(`Could not load workflow settings; defaults are active: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
 		try {
-			const cutoff = Date.now() - retentionDays * 86_400_000;
+			const cutoff = Date.now() - (environmentRetentionDays ?? workflowSettings.retentionDays) * 86_400_000;
 			for (const directory of [stateDir, artifactDir]) {
 				await fs.promises.mkdir(directory, { recursive: true });
 				for (const file of await fs.promises.readdir(directory)) {
@@ -799,6 +857,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		artifactTimers.clear();
 		await Promise.all([...runs.values()].map(async (run) => { await Promise.all([persistNow(run), writeArtifactNow(run)]); }));
 		ctxNow = undefined;
+		unregisterSettings();
 		removeWorkflowDockService(dockService);
 	});
 }

@@ -102,7 +102,20 @@ export async function executeSandboxedWorkflow(source: string, bindings: Sandbox
 	});
 	const vm = runtime.newContext();
 	let phase = "Workflow";
+	let acceptingSettlements = true;
 	const pending = new Set<Promise<unknown>>();
+	const deferreds = new Set<ReturnType<QuickJSContext["newPromise"]>>();
+	const interrupted = () => deadlineReached || options.signal?.aborted === true || options.isAborted?.() === true;
+	const trackSettlement = (promise: Promise<unknown>) => {
+		pending.add(promise);
+		void promise.finally(() => pending.delete(promise)).catch(() => {});
+	};
+	const rejectDeferred = (deferred: ReturnType<QuickJSContext["newPromise"]>, error: unknown) => {
+		if (!acceptingSettlements || interrupted()) return;
+		const handle = vm.newError(error instanceof Error ? error.message : String(error));
+		deferred.reject(handle);
+		handle.dispose();
+	};
 
 	const install = (name: string, fn: (...args: QuickJSHandle[]) => QuickJSHandle) => {
 		const handle = vm.newFunction(name, fn);
@@ -111,35 +124,39 @@ export async function executeSandboxedWorkflow(source: string, bindings: Sandbox
 
 	install("__agent", (promptHandle, optionsHandle, phaseHandle) => {
 		const deferred = vm.newPromise();
+		deferreds.add(deferred);
 		const task = bindings.agent(vm.dump(promptHandle), vm.dump(optionsHandle), vm.getString(phaseHandle));
-		pending.add(task);
-		void task.then((value) => {
+		const settlement = task.then((value) => {
+			if (!acceptingSettlements || interrupted()) return;
 			try {
 				const handle = guestValue(vm, value);
 				deferred.resolve(handle);
 				if (handle !== vm.undefined && handle !== vm.null && handle !== vm.true && handle !== vm.false) handle.dispose();
 			} catch (error) {
-				const handle = vm.newError(error instanceof Error ? error.message : String(error));
-				deferred.reject(handle);
-				handle.dispose();
+				rejectDeferred(deferred, error);
 			}
-		}, (error) => {
-			const handle = vm.newError(error instanceof Error ? error.message : String(error));
-			deferred.reject(handle);
-			handle.dispose();
-		}).finally(() => pending.delete(task));
-		deferred.settled.then(() => runtime.executePendingJobs());
+		}, (error) => rejectDeferred(deferred, error)).catch(() => {});
+		trackSettlement(settlement);
+		trackSettlement(deferred.settled.then(() => {
+			if (acceptingSettlements && !interrupted()) runtime.executePendingJobs();
+		}).catch(() => {}).finally(() => {
+			if (deferreds.delete(deferred)) deferred.dispose();
+		}));
 		return deferred.handle;
 	});
 	install("__approve", (titleHandle, detailHandle) => {
 		const deferred = vm.newPromise();
+		deferreds.add(deferred);
 		const task = bindings.approve(vm.dump(titleHandle), vm.dump(detailHandle));
-		pending.add(task);
-		void task.then((value) => deferred.resolve(value ? vm.true : vm.false), (error) => {
-			const handle = vm.newError(error instanceof Error ? error.message : String(error));
-			deferred.reject(handle); handle.dispose();
-		}).finally(() => pending.delete(task));
-		deferred.settled.then(() => runtime.executePendingJobs());
+		const settlement = task.then((value) => {
+			if (acceptingSettlements && !interrupted()) deferred.resolve(value ? vm.true : vm.false);
+		}, (error) => rejectDeferred(deferred, error)).catch(() => {});
+		trackSettlement(settlement);
+		trackSettlement(deferred.settled.then(() => {
+			if (acceptingSettlements && !interrupted()) runtime.executePendingJobs();
+		}).catch(() => {}).finally(() => {
+			if (deferreds.delete(deferred)) deferred.dispose();
+		}));
 		return deferred.handle;
 	});
 	install("__phase", (nameHandle) => {
@@ -178,7 +195,6 @@ const pipeline = async (items, ...stages) => {
 };
 (async () => { ${source}\n})()`;
 
-	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 	let promiseHandle: QuickJSHandle | undefined;
 	try {
 		const evaluation = vm.evalCode(prelude, "workflow.js");
@@ -194,14 +210,25 @@ const pipeline = async (items, ...stages) => {
 			throw new Error(message);
 		}
 		promiseHandle = evaluation.value;
-		const resolution = vm.resolvePromise(promiseHandle);
-		runtime.executePendingJobs();
-		const timeout = new Promise<never>((_resolve, reject) => {
-			const delay = Math.max(0, deadline - Date.now());
-			deadlineTimer = setTimeout(() => { deadlineReached = true; notifyTimeout(); reject(new Error(`Workflow exceeded wall-clock deadline (${options.timeoutMs}ms)`)); }, delay);
-			options.signal?.addEventListener("abort", () => { if (deadlineTimer) clearTimeout(deadlineTimer); reject(new Error("Workflow sandbox aborted")); }, { once: true });
-		});
-		const resolved = await Promise.race([resolution, timeout]);
+		const waitForResolution = async (): Promise<ReturnType<QuickJSContext["getPromiseState"]>> => {
+			while (true) {
+				runtime.executePendingJobs();
+				const state = vm.getPromiseState(promiseHandle!);
+				if (state.type !== "pending") return state;
+				if (Date.now() >= deadline) {
+					acceptingSettlements = false;
+					deadlineReached = true;
+					notifyTimeout();
+					throw new Error(`Workflow exceeded wall-clock deadline (${options.timeoutMs}ms)`);
+				}
+				if (options.signal?.aborted === true || options.isAborted?.() === true) {
+					acceptingSettlements = false;
+					throw new Error("Workflow sandbox aborted");
+				}
+				await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
+			}
+		};
+		const resolved = await waitForResolution();
 		if (resolved.error) {
 			const detail = vm.dump(resolved.error);
 			resolved.error.dispose();
@@ -216,11 +243,26 @@ const pipeline = async (items, ...stages) => {
 		const valueHandle = resolved.value;
 		const value = vm.dump(valueHandle);
 		valueHandle.dispose();
-		await Promise.allSettled(pending);
+		// A script may start host work without awaiting its guest promise. Keep the run alive
+		// for that work, but never let such work bypass the parent wall-clock deadline.
+		while (pending.size > 0) {
+			if (Date.now() >= deadline) {
+				acceptingSettlements = false;
+				deadlineReached = true;
+				notifyTimeout();
+				throw new Error(`Workflow exceeded wall-clock deadline (${options.timeoutMs}ms)`);
+			}
+			if (options.signal?.aborted === true || options.isAborted?.() === true) {
+				acceptingSettlements = false;
+				throw new Error("Workflow sandbox aborted");
+			}
+			await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))));
+		}
 		return value;
 	} finally {
-		if (deadlineTimer) clearTimeout(deadlineTimer);
-		await Promise.allSettled([...pending]);
+		acceptingSettlements = false;
+		for (const deferred of deferreds) deferred.dispose();
+		deferreds.clear();
 		promiseHandle?.dispose();
 		vm.dispose();
 		runtime.dispose();

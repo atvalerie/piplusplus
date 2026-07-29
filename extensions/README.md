@@ -22,7 +22,8 @@ export default function (pi: ExtensionAPI) {
 
 ## Included resources
 
-- `auto-update.ts` — periodically updates unpinned Pi packages.
+- `piplusplus.ts` / `shared/settings-service.ts` — extensible interactive control center available as `/pi++`, `/piplusplus`, and `/pipp`; owner extensions provide live summaries and retain responsibility for validation, persistence, and runtime synchronization.
+- `auto-update.ts` — periodically updates unpinned Pi packages, with a persistent interval editor in the Pi++ control center.
 - `permissions.ts` / `permission-classifier.ts` — global manual, accept-edits, conservative auto, read-only, optional plan, and session-only dangerous modes with explanatory confirmation and a dependency service for other extensions. Auto mode keeps deterministic safety barriers and can use an authenticated explicitly-free or sub-$0.001 isolated model call to classify otherwise uncertain shell commands; failures always fall back to confirmation.
 - `plan-mode.ts` / `shared/plan-mode.ts` — standalone Claude-style `plan` permission mode, read-only planning, auto/manual execution acceptance, optional native compaction, exact plan handoff, and persistent progress.
 - `shared/permission-service.ts` — shared dependency contract used by the permission extension and consumers such as workflows.

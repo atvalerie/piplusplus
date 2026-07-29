@@ -12,7 +12,8 @@ import { getWorkflowProfile, structuredOutputInstruction } from "./profiles.ts";
 import { zeroUsage } from "./types.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
-const MAX_STREAM_BYTES = 32 * 1024 * 1024;
+const MAX_STREAM_BYTES = 256 * 1024 * 1024;
+const MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_BYTES = 1024 * 1024;
 const MAX_LOG_EVENTS = 2_000;
 const MAX_TOOL_CALLS = 500;
@@ -60,16 +61,6 @@ function invocation(args: string[]): { command: string; args: string[] } {
 	const name = path.basename(process.execPath).toLowerCase();
 	if (!/^(node|bun)(\.exe)?$/.test(name)) return { command: process.execPath, args };
 	return { command: "pi", args };
-}
-
-function finalText(messages: Message[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const message = messages[i];
-		if (message.role !== "assistant") continue;
-		const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
-		if (text) return text;
-	}
-	return "";
 }
 
 export function buildChildAgentArgs(agent: AgentState, model: Pick<Model, "provider" | "id">): string[] {
@@ -134,7 +125,7 @@ export async function runChildAgent(
 ): Promise<ChildResult> {
 	const args = buildChildAgentArgs(agent, model);
 	const call = invocation(args);
-	const messages: Message[] = [];
+	let finalAssistantOutput = "";
 	const usage = zeroUsage();
 	let stderr = "";
 	let buffer = "";
@@ -146,6 +137,7 @@ export async function runChildAgent(
 	let stopReason: string | undefined;
 	let settled = false;
 	let turnLimitTerminated = false;
+	let streamLimitExceeded = false;
 	let errorMessage: string | undefined;
 
 	const exitCode = await new Promise<number>((resolve) => {
@@ -216,9 +208,10 @@ export async function runChildAgent(
 			}
 			if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
 				const message = event.message as Message;
-				messages.push(message);
 				agent.observedMessages = (agent.observedMessages ?? 0) + 1;
 				if (message.role === "assistant") {
+					const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
+					if (text) finalAssistantOutput = text;
 					usage.turns++;
 					agent.usage.turns++;
 					const current = message.usage;
@@ -246,12 +239,23 @@ export async function runChildAgent(
 		};
 
 		proc.stdout?.on("data", (chunk: Buffer) => {
+			if (streamLimitExceeded) return;
 			stdoutBytes += chunk.length;
-			if (stdoutBytes > MAX_STREAM_BYTES) { stderr += `Workflow worker output exceeded ${MAX_STREAM_BYTES} bytes`; terminateProcessTree(proc); return; }
+			if (stdoutBytes > MAX_STREAM_BYTES) {
+				streamLimitExceeded = true;
+				stderr += `Workflow worker output exceeded ${MAX_STREAM_BYTES} bytes`;
+				terminateProcessTree(proc);
+				return;
+			}
 			buffer += stdoutDecoder.write(chunk);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
-			if (Buffer.byteLength(buffer) > MAX_STREAM_BYTES) { stderr += "Workflow worker emitted an oversized NDJSON line"; terminateProcessTree(proc); return; }
+			if (Buffer.byteLength(buffer) > MAX_NDJSON_LINE_BYTES) {
+				streamLimitExceeded = true;
+				stderr += `Workflow worker emitted an oversized NDJSON line (>${MAX_NDJSON_LINE_BYTES} bytes)`;
+				terminateProcessTree(proc);
+				return;
+			}
 			for (const line of lines) processLine(line);
 		});
 		proc.stderr?.on("data", (chunk: Buffer) => {
@@ -261,19 +265,21 @@ export async function runChildAgent(
 		proc.on("error", (error) => { stderr += error.message; resolve(1); });
 		proc.on("close", (code) => {
 			agent.process = undefined;
-			buffer += stdoutDecoder.end();
+			if (!streamLimitExceeded) {
+				buffer += stdoutDecoder.end();
+				if (buffer.trim()) processLine(buffer);
+			}
 			stderr += stderrDecoder.end();
 			if (stderrBytes > MAX_STDERR_BYTES) stderr += `\n[stderr truncated after ${MAX_STDERR_BYTES} bytes]`;
-			if (buffer.trim()) processLine(buffer);
 			if (stderr.trim()) addLog({ at: Date.now(), type: "stderr", message: stderr.trim() });
 			addLog({ at: Date.now(), type: "process_exit", message: String(code ?? 1) });
-			resolve(settled ? 0 : code ?? 1);
+			resolve(streamLimitExceeded ? 1 : settled ? 0 : code ?? 1);
 		});
 	});
 
 	return {
 		exitCode,
-		output: finalText(messages),
+		output: finalAssistantOutput,
 		stderr,
 		usage,
 		model: selectedModel,

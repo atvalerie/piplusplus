@@ -530,7 +530,8 @@ export function createWorkflowController(
 					const error = modelMismatch
 						? `Model identity mismatch: requested ${model.provider}/${model.id}, child reported ${result.model ?? "(none)"}`
 						: validation.error || result.errorMessage || result.stderr.trim() || `Worker exited with code ${result.exitCode}`;
-					const maxRetries = modelMismatch || validation.schemaError || budgetStopsScheduling ? 0 : Math.max(0, Math.min(10, run.spec.maxRetries ?? 3));
+					const deterministicChildFailure = /Workflow worker output exceeded|oversized NDJSON line/i.test(error);
+					const maxRetries = modelMismatch || validation.schemaError || budgetStopsScheduling || deterministicChildFailure ? 0 : Math.max(0, Math.min(10, run.spec.maxRetries ?? 3));
 					if (agent.attempt <= maxRetries) {
 						const base = Math.max(100, Math.min(60_000, run.spec.retryBaseMs ?? 1_000));
 						const delay = Math.min(60_000, base * 2 ** (agent.attempt - 1));

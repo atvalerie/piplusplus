@@ -22,6 +22,10 @@ export interface WorkflowSettings {
 	 */
 	maxTurnsMode: WorkflowMaxTurnsMode;
 	customMaxTurns?: number;
+	/** Days to retain workflow run indexes and large-payload sidecars. */
+	retentionDays: number;
+	/** Whether workflow launch is allowed without an interactive approval UI. */
+	headlessPolicy: "allow" | "deny";
 }
 
 export const DEFAULT_WORKFLOW_SETTINGS: WorkflowSettings = {
@@ -29,6 +33,8 @@ export const DEFAULT_WORKFLOW_SETTINGS: WorkflowSettings = {
 	ultracodeEffortMode: "one-prompt",
 	budgetMode: "off",
 	maxTurnsMode: "off",
+	retentionDays: 30,
+	headlessPolicy: "allow",
 };
 
 export function workflowSettingsPath(agentDir: string): string {
@@ -87,6 +93,12 @@ function normalizedSettings(value: unknown): WorkflowSettings {
 	try { customMaxTurns = record.customMaxTurns === undefined ? undefined : normalizeCustomMaxTurns(record.customMaxTurns); }
 	catch { customMaxTurns = undefined; }
 	if (maxTurnsMode === "custom" && customMaxTurns === undefined) maxTurnsMode = "off";
+	const retentionDays = Number.isInteger(record.retentionDays) && Number(record.retentionDays) >= 1 && Number(record.retentionDays) <= 365
+		? Number(record.retentionDays)
+		: DEFAULT_WORKFLOW_SETTINGS.retentionDays;
+	const headlessPolicy = record.headlessPolicy === "deny" || record.headlessPolicy === "allow"
+		? record.headlessPolicy
+		: DEFAULT_WORKFLOW_SETTINGS.headlessPolicy;
 	return {
 		triggersEnabled: typeof record.triggersEnabled === "boolean" ? record.triggersEnabled : DEFAULT_WORKFLOW_SETTINGS.triggersEnabled,
 		ultracodeEffortMode: record.ultracodeEffortMode === "session" || record.ultracodeEffortMode === "one-prompt"
@@ -96,6 +108,8 @@ function normalizedSettings(value: unknown): WorkflowSettings {
 		...(customBudgets === undefined ? {} : { customBudgets }),
 		maxTurnsMode,
 		...(customMaxTurns === undefined ? {} : { customMaxTurns }),
+		retentionDays,
+		headlessPolicy,
 	};
 }
 
@@ -160,6 +174,10 @@ export async function saveWorkflowSettings(agentDir: string, settings: WorkflowS
 		throw new Error("Custom workflow budget mode requires at least one configured limit.");
 	}
 	if (settings.maxTurnsMode === "custom") normalizeCustomMaxTurns(settings.customMaxTurns);
+	if (!Number.isInteger(settings.retentionDays) || settings.retentionDays < 1 || settings.retentionDays > 365) {
+		throw new Error("Workflow retentionDays must be an integer from 1 to 365.");
+	}
+	if (settings.headlessPolicy !== "allow" && settings.headlessPolicy !== "deny") throw new Error("Workflow headlessPolicy must be allow or deny.");
 	const normalized = normalizedSettings(settings);
 	const target = workflowSettingsPath(agentDir);
 	assertSafeSettingsPath(agentDir, target);

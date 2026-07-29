@@ -20,14 +20,14 @@ Direct file policy resolves both the requested path and real path. For non-exist
 - Workers: at most 1,000 total and 16 concurrent.
 - Optional user-owned scheduling thresholds: agent count, consumed input/output/cache tokens, and reported cost. Exhaustion blocks new starts, but already-running workers may report an in-flight overrun. Worker `maxTurns` has a separate persistent off/custom/model policy and defaults to unlimited; a custom or model-enabled limit and the workflow deadline terminate active work.
 - Size guidance: `small` <5 agents, `medium` <15, `large` <50, or `unrestricted`; warning thresholds are more than 25 scheduled agents or more than 1.5 million projected output tokens.
-- Worker stdout/NDJSON: 32 MiB maximum.
+- Worker stdout/NDJSON: 256 MiB total safety ceiling and 16 MiB per-line ceiling. The stream is parsed incrementally and only the latest final assistant text is retained for handoff.
 - Worker stderr: 1 MiB retained.
 - Tool-call summaries: 500 per worker, with arguments bounded to 8 KiB each; omitted counts remain explicit.
 - Lifecycle log events: 2,000 per worker and 5,000 per run. Stream progress is not duplicated into lifecycle logs. Raw Pi JSON events and complete messages are processed transiently and are not retained by default.
 - Failed worker attempts retry three times with bounded exponential backoff by default; cancellation wakes pending backoffs.
 - Schema-validation failures are retryable; model-policy, model-identity, turn-limit, and hard-budget failures are deterministic and are not retried.
 - UTF-8 is decoded with `StringDecoder`, preserving characters split across chunks.
-- Cancellation terminates the worker process tree, then escalates after a grace period. Linux uses process groups; Windows uses `taskkill.exe /t /f`.
+- Cancellation terminates the worker process tree, then escalates after a grace period. Linux uses process groups; Windows uses `taskkill.exe /t /f`. QuickJS async host bridges are detached before sandbox disposal, so deadline/abort races cannot call into a freed runtime.
 - Run, artifact, saved-workflow, settings, and trust files use atomic replacement and owner-only modes where supported. Runs/artifacts default to 30-day retention. Schema-v7 artifacts are compact indexes: prompt/result previews adapt to agent count and top out at 64 KiB, large final values live in immutable sidecars, and duplicate raw-event/message transcripts are omitted. Treat indexes and sidecars as sensitive session data.
 - Same-session resume executes the sandbox script again and reuses only invocation-hash matches. Cache identity includes script, prompt, options, exact model, policy, args, and upstream result generations; explicit upstream restart invalidates dependent results.
 

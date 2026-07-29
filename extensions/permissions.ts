@@ -14,6 +14,7 @@ import {
 } from "./permission-classifier.ts";
 import { acceptEditsAutoApproves, explainPermission } from "./workflows/permissions.ts";
 import { installPermissionService, removePermissionService, type GlobalPermissionMode, type PermissionService } from "./shared/permission-service.ts";
+import { registerPiPlusPlusSettingsSection } from "./shared/settings-service.ts";
 import type { PermissionRequest } from "./workflows/types.ts";
 import { Key } from "@earendil-works/pi-tui";
 
@@ -199,9 +200,36 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(`Permission mode: ${selected}`, "info");
 	};
 
+	const openPermissionSettings = async (ctx: ExtensionContext) => {
+		while (ctx.hasUI) {
+			const modeItem = `Permission mode · ${mode}`;
+			const classifierItem = `AI command classifier · ${aiClassifierEnabled ? "on" : "off"}`;
+			const selected = await ctx.ui.select("Pi++ permissions", [modeItem, classifierItem, "Back"]);
+			if (!selected || selected === "Back") return;
+			if (selected === modeItem) await selectMode("", ctx);
+			else {
+				const value = await ctx.ui.select("AI command classifier", [
+					`On${aiClassifierEnabled ? " · current" : ""}`,
+					`Off${!aiClassifierEnabled ? " · current" : ""}`,
+					"Back",
+				]);
+				if (value?.startsWith("On")) await selectMode("classifier on", ctx);
+				else if (value?.startsWith("Off")) await selectMode("classifier off", ctx);
+			}
+		}
+	};
+	const unregisterSettings = registerPiPlusPlusSettingsSection({
+		id: "permissions",
+		label: "Permissions",
+		description: "Global tool policy and optional AI command classifier",
+		order: 10,
+		summary: () => `${mode} · classifier ${aiClassifierEnabled ? "on" : "off"}`,
+		open: openPermissionSettings,
+	});
+
 	pi.registerCommand("permissions", { description: "View or change the global tool permission mode", handler: selectMode });
 	pi.registerShortcut(Key.ctrlAlt("m"), { description: "Open Pi++ permission mode selector", handler: async (ctx) => selectMode("", ctx) });
 
 	pi.on("session_start", (_event, ctx) => { currentContext = ctx; });
-	pi.on("session_shutdown", () => { currentContext = undefined; listeners.clear(); removePermissionService(service); });
+	pi.on("session_shutdown", () => { currentContext = undefined; listeners.clear(); unregisterSettings(); removePermissionService(service); });
 }

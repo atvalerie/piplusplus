@@ -11,6 +11,7 @@ import { Surface } from "../ui/primitives/surface.ts";
 import { getPermissionService } from "./shared/permission-service.ts";
 import { getTelemetryService } from "./shared/telemetry-service.ts";
 import { getWorkflowDockService } from "./shared/workflow-dock-service.ts";
+import { registerPiPlusPlusSettingsSection } from "./shared/settings-service.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 
@@ -126,6 +127,60 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	const configureAliases = async (ctx: ExtensionContext) => {
+		while (ctx.hasUI) {
+			const configured = aliases.list();
+			const options = configured.map((alias) => `/${alias.name} → ${alias.target}${alias.customized ? " · custom" : " · default"}`);
+			options.push("Add alias", "Back");
+			const selected = await ctx.ui.select("Pi++ command aliases", options);
+			if (!selected || selected === "Back") return;
+			if (selected === "Add alias") {
+				const name = await ctx.ui.input("Alias name", "e.g. review");
+				if (name === undefined) continue;
+				const target = await ctx.ui.input("Alias target", "e.g. /workflows");
+				if (target === undefined) continue;
+				try {
+					aliases.set(name, target);
+					registerAliasCommand(name.replace(/^\//, "").toLowerCase());
+					ctx.ui.notify(`/${name.replace(/^\//, "")} → ${target.startsWith("/") ? target : `/${target}`}`, "info");
+				} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+				continue;
+			}
+			const index = options.indexOf(selected);
+			const alias = configured[index];
+			if (!alias) continue;
+			const action = await ctx.ui.select(`/${alias.name} → ${alias.target}`, ["Edit target", "Remove", "Reset to default", "Back"]);
+			try {
+				if (action === "Edit target") {
+					const target = await ctx.ui.input(`Target for /${alias.name}`, alias.target);
+					if (target !== undefined) aliases.set(alias.name, target);
+				} else if (action === "Remove") aliases.remove(alias.name);
+				else if (action === "Reset to default") aliases.reset(alias.name);
+			} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+		}
+	};
+
+	const openInterfaceSettings = async (ctx: ExtensionContext) => {
+		while (ctx.hasUI) {
+			const effortItem = `Reasoning effort · ${pi.getThinkingLevel()}`;
+			const keybindingsItem = `Keybindings · ${registry.getDefinitions().filter((item) => registry.isCustomized(item.id)).length} Pi++ override(s)`;
+			const aliasesItem = `Command aliases · ${aliases.list().length} configured`;
+			const selected = await ctx.ui.select("Pi++ interface", [effortItem, keybindingsItem, aliasesItem, "Back"]);
+			if (!selected || selected === "Back") return;
+			if (selected === effortItem) await showEffort(ctx);
+			else if (selected === keybindingsItem) await showKeybindings(ctx);
+			else await configureAliases(ctx);
+		}
+	};
+	const unregisterSettings = registerPiPlusPlusSettingsSection({
+		id: "interface",
+		label: "Interface",
+		description: "Reasoning effort, Pi and Pi++ keybindings, and command aliases",
+		order: 30,
+		summary: () => `${pi.getThinkingLevel()} effort · ${aliases.list().length} aliases`,
+		open: openInterfaceSettings,
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
@@ -197,4 +252,6 @@ export default function interfaceExtension(pi: ExtensionAPI) {
 			};
 		});
 	});
+
+	pi.on("session_shutdown", () => unregisterSettings());
 }

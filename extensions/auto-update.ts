@@ -8,11 +8,13 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { registerPiPlusPlusSettingsSection } from "./shared/settings-service.ts";
 
 const DEFAULT_INTERVAL_MINUTES = 60;
 const MIN_INTERVAL_MINUTES = 1;
 const UPDATE_TIMEOUT_MS = 120_000;
+const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
 
 export interface PiInvocation { command: string; args: string[] }
 
@@ -44,6 +46,14 @@ function intervalFrom(value: boolean | string | undefined): number {
 }
 
 export default function autoUpdateExtension(pi: ExtensionAPI) {
+	if (process.env[CHILD_ENV] === "1") return;
+	const configPath = path.join(getAgentDir(), "piplusplus-auto-update.json");
+	let configuredInterval: number | undefined;
+	try {
+		const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as { intervalMinutes?: unknown };
+		if (typeof parsed.intervalMinutes === "number" && Number.isFinite(parsed.intervalMinutes) && parsed.intervalMinutes >= MIN_INTERVAL_MINUTES) configuredInterval = Math.floor(parsed.intervalMinutes);
+	} catch { /* use flag/default */ }
+	let intervalMinutes = configuredInterval ?? DEFAULT_INTERVAL_MINUTES;
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let updateInProgress = false;
 
@@ -89,6 +99,20 @@ export default function autoUpdateExtension(pi: ExtensionAPI) {
 		}
 	}
 
+	const schedule = (ctx: ExtensionContext) => {
+		if (timer) clearInterval(timer);
+		timer = setInterval(() => { void updateExtensions(ctx, "scheduled"); }, intervalMinutes * 60_000);
+	};
+	const persistInterval = async () => {
+		await fs.promises.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
+		const temp = `${configPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+		try {
+			await fs.promises.writeFile(temp, `${JSON.stringify({ intervalMinutes }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+			await fs.promises.rename(temp, configPath);
+			try { await fs.promises.chmod(configPath, 0o600); } catch { /* best effort */ }
+		} finally { await fs.promises.rm(temp, { force: true }).catch(() => {}); }
+	};
+
 	pi.registerCommand("extension-update", {
 		description: "Check for and install updates for unpinned Pi packages",
 		handler: async (_args, ctx) => {
@@ -96,18 +120,41 @@ export default function autoUpdateExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	const unregisterSettings = registerPiPlusPlusSettingsSection({
+		id: "maintenance",
+		label: "Maintenance",
+		description: "Automatic update interval and immediate extension update checks",
+		order: 50,
+		summary: () => `updates every ${intervalMinutes} min`,
+		open: async (ctx) => {
+			while (ctx.hasUI) {
+				const intervalItem = `Automatic update interval · ${intervalMinutes} minutes`;
+				const selected = await ctx.ui.select("Pi++ maintenance", [intervalItem, "Check for extension updates now", "Back"]);
+				if (!selected || selected === "Back") return;
+				if (selected === "Check for extension updates now") { await updateExtensions(ctx, "manual"); continue; }
+				const entered = await ctx.ui.input("Minutes between extension update checks", `Minimum ${MIN_INTERVAL_MINUTES}`);
+				if (entered === undefined) continue;
+				const parsed = Number(entered.trim());
+				if (!Number.isFinite(parsed) || parsed < MIN_INTERVAL_MINUTES) { ctx.ui.notify(`Update interval must be at least ${MIN_INTERVAL_MINUTES} minute.`, "error"); continue; }
+				const previous = intervalMinutes;
+				intervalMinutes = Math.floor(parsed);
+				try { await persistInterval(); schedule(ctx); ctx.ui.notify(`Automatic update interval: ${intervalMinutes} minutes.`, "info"); }
+				catch (error) { intervalMinutes = previous; ctx.ui.notify(`Could not save update interval: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+			}
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
-		const intervalMinutes = intervalFrom(pi.getFlag("extension-update-interval"));
+		if (configuredInterval === undefined) intervalMinutes = intervalFrom(pi.getFlag("extension-update-interval"));
 
 		// Long-lived resources must start from session_start, not the factory.
 		await updateExtensions(ctx, "startup");
-		timer = setInterval(() => {
-			void updateExtensions(ctx, "scheduled");
-		}, intervalMinutes * 60_000);
+		schedule(ctx);
 	});
 
 	pi.on("session_shutdown", () => {
 		if (timer) clearInterval(timer);
 		timer = undefined;
+		unregisterSettings();
 	});
 }

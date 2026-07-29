@@ -1,4 +1,4 @@
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, type Component, type Terminal } from "@earendil-works/pi-tui";
 import { fitLine } from "../ui/foundation/text.ts";
 import { Inspector, type InspectorSection } from "../ui/interactive/inspector.ts";
@@ -7,6 +7,7 @@ import { paint } from "../ui/primitives/theme.ts";
 import { formatCount } from "../ui/interface/footer.ts";
 import { getSecretService } from "./shared/secret-service.ts";
 import { getTelemetryService, type ProviderTelemetry } from "./shared/telemetry-service.ts";
+import { registerPiPlusPlusSettingsSection } from "./shared/settings-service.ts";
 
 function money(value: number | undefined): string { return value === undefined ? "—" : `$${value.toFixed(value < 1 ? 4 : 2)}`; }
 
@@ -43,9 +44,7 @@ class TelemetryPanel implements Component {
 }
 
 export default function telemetryUi(pi: ExtensionAPI) {
-	pi.registerCommand("telemetry", {
-		description: "View telemetry or run setup|clear [provider]",
-		handler: async (args, ctx) => {
+	const handleTelemetry = async (args: string, ctx: ExtensionCommandContext) => {
 			const service = getTelemetryService();
 			if (!service) { ctx.ui.notify("Enable the telemetry-core extension first.", "warning"); return; }
 			const parts = args.trim().split(/\s+/).filter(Boolean);
@@ -88,6 +87,38 @@ export default function telemetryUi(pi: ExtensionAPI) {
 					return { render: (width) => panel.render(width), invalidate: () => panel.invalidate(), handleInput: (data) => { body.handleInput(data); tui.requestRender(); } };
 				}, { overlay: true, overlayOptions: { width: "48%", minWidth: 48, maxHeight: "90%", anchor: "right-center", margin: 1 } });
 			} finally { mouseTerminal?.write("\x1b[?1006l\x1b[?1000l"); }
+	};
+
+	pi.registerCommand("telemetry", {
+		description: "View telemetry or run setup|clear [provider]",
+		handler: handleTelemetry,
+	});
+
+	const unregisterSettings = registerPiPlusPlusSettingsSection({
+		id: "integrations",
+		label: "Integrations",
+		description: "Provider telemetry and owner-only credential setup",
+		order: 40,
+		summary: () => {
+			const service = getTelemetryService();
+			const count = service?.getAll().length ?? 0;
+			return `${count} telemetry source${count === 1 ? "" : "s"}`;
+		},
+		open: async (ctx) => {
+			while (ctx.hasUI) {
+				const service = getTelemetryService();
+				const providers = service?.getAll().map((item) => item.provider) ?? [];
+				const selected = await ctx.ui.select("Pi++ integrations", ["View provider telemetry", "Set up telemetry credential", "Clear telemetry credential", "Back"]);
+				if (!selected || selected === "Back") return;
+				let provider: string | undefined;
+				if (providers.length > 1) provider = await ctx.ui.select("Provider", providers);
+				else provider = providers[0];
+				if (providers.length > 1 && !provider) continue;
+				if (selected === "View provider telemetry") await handleTelemetry(provider ?? "", ctx);
+				else if (selected === "Set up telemetry credential") await handleTelemetry(`setup${provider ? ` ${provider}` : ""}`, ctx);
+				else await handleTelemetry(`clear${provider ? ` ${provider}` : ""}`, ctx);
+			}
 		},
 	});
+	pi.on("session_shutdown", () => unregisterSettings());
 }

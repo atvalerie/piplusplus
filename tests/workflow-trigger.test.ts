@@ -30,11 +30,11 @@ test("workflow trigger and effort settings persist independently from runs and a
 	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-workflow-settings-"));
 	try {
 		assert.deepEqual(await loadWorkflowSettings(agentDir), DEFAULT_WORKFLOW_SETTINGS);
-		await saveWorkflowSettings(agentDir, { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off", maxTurnsMode: "off" });
-		assert.deepEqual(await loadWorkflowSettings(agentDir), { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off", maxTurnsMode: "off" });
+		await saveWorkflowSettings(agentDir, { ...DEFAULT_WORKFLOW_SETTINGS, triggersEnabled: false, ultracodeEffortMode: "session" });
+		assert.deepEqual(await loadWorkflowSettings(agentDir), { ...DEFAULT_WORKFLOW_SETTINGS, triggersEnabled: false, ultracodeEffortMode: "session" });
 		assert.equal(path.basename(workflowSettingsPath(agentDir)), "settings.json");
 		const parsed = JSON.parse(fs.readFileSync(workflowSettingsPath(agentDir), "utf8"));
-		assert.deepEqual(parsed, { triggersEnabled: false, ultracodeEffortMode: "session", budgetMode: "off", maxTurnsMode: "off" });
+		assert.deepEqual(parsed, { ...DEFAULT_WORKFLOW_SETTINGS, triggersEnabled: false, ultracodeEffortMode: "session" });
 	} finally {
 		fs.rmSync(agentDir, { recursive: true, force: true });
 	}

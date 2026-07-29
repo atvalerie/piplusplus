@@ -91,6 +91,32 @@ test("sandbox exposes structured workflow args as copied guest data", async () =
 	assert.deepEqual(supplied, { topic: "routing", nested: { count: 2 }, items: ["a", "b"] });
 });
 
+test("unreferenced host work cannot keep sandbox teardown past its deadline", async () => {
+	const started = Date.now();
+	await assert.rejects(
+		() => executeSandboxedWorkflow(`void agent("detached"); return "done";`, {
+			...bindings(),
+			agent: async () => new Promise((_, reject) => setTimeout(() => reject(new Error("late detached failure")), 300)),
+		}, { timeoutMs: 40 }),
+		/wall-clock deadline/,
+	);
+	assert.ok(Date.now() - started < 1_000);
+	await new Promise((resolve) => setTimeout(resolve, 330));
+});
+
+test("sandbox abandons late host settlements safely after its wall-clock deadline", async () => {
+	let rejectWorker!: (error: Error) => void;
+	const worker = new Promise<never>((_resolve, reject) => { rejectWorker = reject; });
+	const started = Date.now();
+	await assert.rejects(
+		executeSandboxedWorkflow("return await agent('slow')", bindings(async () => worker), { timeoutMs: 30 }),
+		/deadline/,
+	);
+	assert.ok(Date.now() - started < 500, "sandbox timeout must not wait for an uncooperative host promise");
+	rejectWorker(new Error("late worker failure"));
+	await new Promise((resolve) => setTimeout(resolve, 20));
+});
+
 test("sandbox interrupts synchronous infinite loops at the wall-clock deadline", async () => {
 	let timedOut = 0;
 	await assert.rejects(
