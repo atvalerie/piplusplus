@@ -5,7 +5,8 @@ export type CommandClassifierVerdict = "ALLOW" | "ASK";
 
 export const CLASSIFIER_MAX_COMMAND_BYTES = 16 * 1024;
 export const CLASSIFIER_ESTIMATED_INPUT_TOKENS = 1_000;
-export const CLASSIFIER_MAX_OUTPUT_TOKENS = 64;
+export const CLASSIFIER_MAX_OUTPUT_TOKENS = 256;
+export const CLASSIFIER_REASONING_LEVEL = "low" as const;
 export const CLASSIFIER_TIMEOUT_MS = 20_000;
 /** At most one tenth of one US cent at catalog rates. */
 export const CLASSIFIER_MAX_ESTIMATED_COST_USD = 0.001;
@@ -39,16 +40,16 @@ function explicitlyFree(model: Model<Api>): boolean {
 	return zeroCatalogCost && !/^(?:openai|openai-codex|anthropic)$/i.test(model.provider);
 }
 
-/** Free models first, then only models whose tiny classification call is genuinely cheap. */
+/** Rank every eligible model by its catalog estimate; free labels only affect eligibility and tie-breaking. */
 export function rankPermissionClassifierModels(models: readonly Model<Api>[], inputTokens = CLASSIFIER_ESTIMATED_INPUT_TOKENS): RankedClassifierModel[] {
 	return models
 		.filter((model) => model.input.includes("text") && model.contextWindow >= inputTokens + CLASSIFIER_MAX_OUTPUT_TOKENS && model.maxTokens >= CLASSIFIER_MAX_OUTPUT_TOKENS)
 		.map((model) => ({ model, explicitlyFree: explicitlyFree(model), estimatedCostUsd: estimatedClassifierCost(model, inputTokens) }))
 		.filter((candidate) => candidate.explicitlyFree || (candidate.estimatedCostUsd > 0 && candidate.estimatedCostUsd <= CLASSIFIER_MAX_ESTIMATED_COST_USD))
 		.sort((left, right) =>
-			Number(right.explicitlyFree) - Number(left.explicitlyFree)
+			left.estimatedCostUsd - right.estimatedCostUsd
+			|| Number(right.explicitlyFree) - Number(left.explicitlyFree)
 			|| Number(left.model.reasoning) - Number(right.model.reasoning)
-			|| left.estimatedCostUsd - right.estimatedCostUsd
 			|| `${left.model.provider}/${left.model.id}`.localeCompare(`${right.model.provider}/${right.model.id}`));
 }
 
