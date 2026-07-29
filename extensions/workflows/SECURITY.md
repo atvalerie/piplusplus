@@ -20,7 +20,8 @@ Direct file policy resolves both the requested path and real path. For non-exist
 - Workers: at most 1,000 total and 16 concurrent.
 - Optional user-owned scheduling thresholds: agent count, consumed input/output/cache tokens, and reported cost. Exhaustion blocks new starts, but already-running workers may report an in-flight overrun. Worker `maxTurns` has a separate persistent off/custom/model policy and defaults to unlimited; a custom or model-enabled limit and the workflow deadline terminate active work.
 - Size guidance: `small` <5 agents, `medium` <15, `large` <50, or `unrestricted`; warning thresholds are more than 25 scheduled agents or more than 1.5 million projected output tokens.
-- Worker stdout/NDJSON: 256 MiB total safety ceiling and 16 MiB per-line ceiling. The stream is parsed incrementally and only the latest final assistant text is retained for handoff.
+- Worker prompts travel over stdin rather than process arguments; generated profile/schema instructions use an owner-only temporary file consumed by Pi's file-aware system-prompt option. This avoids Windows command-line limits without exposing prompt contents in process listings.
+- Worker results use plain print-mode stdout with a 16 MiB final-response ceiling. A dedicated IPC pipe carries only compact lifecycle/usage/tool metadata with a 64 KiB per-event ceiling; token-by-token `message_update` snapshots and full tool results are never forwarded to the parent.
 - Worker stderr: 1 MiB retained.
 - Tool-call summaries: 500 per worker, with arguments bounded to 8 KiB each; omitted counts remain explicit.
 - Lifecycle log events: 2,000 per worker and 5,000 per run. Stream progress is not duplicated into lifecycle logs. Raw Pi JSON events and complete messages are processed transiently and are not retained by default.

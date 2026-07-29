@@ -133,13 +133,13 @@ test("token and cost budgets stop later workers without retrying deterministic e
 	}
 });
 
-test("worker stream safety-limit failures are deterministic and never retried", async () => {
+test("worker final-response safety-limit failures are deterministic and never retried", async () => {
 	const run = workflow(`return await agent("oversized", { id: "oversized" });`);
 	let calls = 0;
 	await createWorkflowController(run, [model], model, callbacks(), {
 		runChildAgent: (async () => {
 			calls++;
-			return { ...result(""), exitCode: 1, stderr: "Workflow worker output exceeded 268435456 bytes" };
+			return { ...result(""), exitCode: 1, stderr: "Workflow worker final response exceeded 16777216 bytes" };
 		}) as any,
 	}).execute();
 
@@ -147,7 +147,7 @@ test("worker stream safety-limit failures are deterministic and never retried", 
 	assert.equal(run.status, "completed_with_flags");
 	assert.equal(run.agents[0].status, "failed");
 	assert.equal(run.agents[0].attempt, 1);
-	assert.match(run.agents[0].error ?? "", /output exceeded/);
+	assert.match(run.agents[0].error ?? "", /final response exceeded/);
 });
 
 test("maxTurns exhaustion is deterministic and is never retried", async () => {

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import type { Writable } from "node:stream";
@@ -12,8 +13,8 @@ import { getWorkflowProfile, structuredOutputInstruction } from "./profiles.ts";
 import { zeroUsage } from "./types.ts";
 
 const CHILD_ENV = "PIPLUSPLUS_WORKFLOW_CHILD";
-const MAX_STREAM_BYTES = 256 * 1024 * 1024;
-const MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024;
+const MAX_FINAL_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_WORKER_EVENT_LINE_BYTES = 64 * 1024;
 const MAX_STDERR_BYTES = 1024 * 1024;
 const MAX_LOG_EVENTS = 2_000;
 const MAX_TOOL_CALLS = 500;
@@ -63,28 +64,84 @@ function invocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
-export function buildChildAgentArgs(agent: AgentState, model: Pick<Model, "provider" | "id">): string[] {
-	const args = ["--mode", "json", "-p", "--no-session", "-e", fileURLToPath(new URL("./permission-child.ts", import.meta.url)), "--model", `${model.provider}/${model.id}`];
+export function buildChildSystemInstructions(agent: AgentState): string | undefined {
+	const instructions: string[] = [];
+	const profile = getWorkflowProfile(agent.profile);
+	if (profile) instructions.push(`[Workflow specialist profile: ${profile.name}]\n${profile.instruction}`);
+	const structuredContract = structuredOutputInstruction(agent.schema);
+	if (structuredContract) instructions.push(structuredContract);
+	return instructions.length ? instructions.join("\n\n") : undefined;
+}
+
+export function buildChildAgentArgs(
+	agent: AgentState,
+	model: Pick<Model, "provider" | "id">,
+	appendSystemPromptPath?: string,
+): string[] {
+	const args = ["--mode", "text", "-p", "--no-session", "-e", fileURLToPath(new URL("./permission-child.ts", import.meta.url)), "--model", `${model.provider}/${model.id}`];
 	const thinking = agent.effectiveThinking ?? agent.thinking;
 	if (thinking) args.push("--thinking", thinking);
 	if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
-	const systemInstructions: string[] = [];
-	const profile = getWorkflowProfile(agent.profile);
-	if (profile) systemInstructions.push(`[Workflow specialist profile: ${profile.name}]\n${profile.instruction}`);
-	const structuredContract = structuredOutputInstruction(agent.schema);
-	if (structuredContract) systemInstructions.push(structuredContract);
-	if (systemInstructions.length) args.push("--append-system-prompt", systemInstructions.join("\n\n"));
-	args.push(agent.prompt);
+	if (appendSystemPromptPath) args.push("--append-system-prompt", appendSystemPromptPath);
 	return args;
+}
+
+export interface PreparedChildAgentLaunch {
+	args: string[];
+	stdin: string;
+	systemPromptFile?: string;
+	cleanup: () => void;
+}
+
+/**
+ * Windows CreateProcess has a small command-line limit. Prompts therefore
+ * travel over stdin, while Pi's file-aware --append-system-prompt receives
+ * only a short temporary path.
+ */
+export function prepareChildAgentLaunch(
+	agent: AgentState,
+	model: Pick<Model, "provider" | "id">,
+	tempRoot = os.tmpdir(),
+): PreparedChildAgentLaunch {
+	const systemInstructions = buildChildSystemInstructions(agent);
+	let tempDir: string | undefined;
+	let systemPromptFile: string | undefined;
+	let cleaned = false;
+	const cleanup = () => {
+		if (cleaned) return;
+		cleaned = true;
+		if (systemPromptFile) {
+			try { fs.rmSync(systemPromptFile, { force: true }); } catch { /* best effort */ }
+		}
+		if (tempDir) {
+			try { fs.rmdirSync(tempDir); } catch { /* best effort */ }
+		}
+	};
+	try {
+		if (systemInstructions) {
+			tempDir = fs.mkdtempSync(path.join(tempRoot, "piplusplus-worker-"));
+			systemPromptFile = path.join(tempDir, "system-prompt.md");
+			fs.writeFileSync(systemPromptFile, systemInstructions, { encoding: "utf8", mode: 0o600 });
+		}
+		return {
+			args: buildChildAgentArgs(agent, model, systemPromptFile),
+			stdin: agent.prompt,
+			systemPromptFile,
+			cleanup,
+		};
+	} catch (error) {
+		cleanup();
+		throw error;
+	}
 }
 
 export function formatChildInvocationForLog(command: string, args: string[]): string {
 	const visible: string[] = [];
-	for (let index = 0; index < args.length - 1; index++) {
+	for (let index = 0; index < args.length; index++) {
 		const value = args[index];
 		visible.push(value);
-		if (value === "--append-system-prompt" && index + 1 < args.length - 1) {
-			visible.push("[structured-output-contract]");
+		if (value === "--append-system-prompt" && index + 1 < args.length) {
+			visible.push("[workflow-system-prompt-file]");
 			index++;
 		}
 	}
@@ -123,13 +180,22 @@ export async function runChildAgent(
 	onUpdate: () => void,
 	onPermission: (request: PermissionRequest) => Promise<boolean>,
 ): Promise<ChildResult> {
-	const args = buildChildAgentArgs(agent, model);
-	const call = invocation(args);
-	let finalAssistantOutput = "";
 	const usage = zeroUsage();
+	let launch: PreparedChildAgentLaunch;
+	try {
+		launch = prepareChildAgentLaunch(agent, model);
+	} catch (error) {
+		return {
+			exitCode: 1,
+			output: "",
+			stderr: `Could not prepare workflow worker input: ${error instanceof Error ? error.message : String(error)}`,
+			usage,
+		};
+	}
+	const call = invocation(launch.args);
+	let finalAssistantOutput = "";
 	let stderr = "";
-	let buffer = "";
-	let stdoutBytes = 0;
+	let finalOutputBytes = 0;
 	let stderrBytes = 0;
 	const stdoutDecoder = new StringDecoder("utf8");
 	const stderrDecoder = new StringDecoder("utf8");
@@ -137,23 +203,37 @@ export async function runChildAgent(
 	let stopReason: string | undefined;
 	let settled = false;
 	let turnLimitTerminated = false;
-	let streamLimitExceeded = false;
+	let outputLimitExceeded = false;
 	let errorMessage: string | undefined;
 
 	const exitCode = await new Promise<number>((resolve) => {
-		const proc = spawn(call.command, call.args, {
-			cwd,
-			shell: false,
-			stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
-			env: { ...process.env, [CHILD_ENV]: "1", PIPLUSPLUS_PERMISSION_IPC: "1" },
-			detached: process.platform !== "win32",
-			windowsHide: true,
-		});
-		agent.process = proc;
+		let resolved = false;
+		const resolveOnce = (code: number) => {
+			if (resolved) return;
+			resolved = true;
+			resolve(code);
+		};
 		const addLog = (entry: AgentState["logs"][number]) => {
 			if (agent.logs.length < MAX_LOG_EVENTS) agent.logs.push(entry);
 			else agent.droppedLogEvents = (agent.droppedLogEvents ?? 0) + 1;
 		};
+		let proc: ReturnType<typeof spawn>;
+		try {
+			proc = spawn(call.command, call.args, {
+				cwd,
+				shell: false,
+				stdio: ["pipe", "pipe", "pipe", "pipe", "pipe", "pipe"],
+				env: { ...process.env, [CHILD_ENV]: "1", PIPLUSPLUS_PERMISSION_IPC: "1" },
+				detached: process.platform !== "win32",
+				windowsHide: true,
+			});
+		} catch (error) {
+			launch.cleanup();
+			stderr = error instanceof Error ? error.message : String(error);
+			resolveOnce(1);
+			return;
+		}
+		agent.process = proc;
 		const turnLimitGuard = createTurnLimitGuard(agent.maxTurns, () => {
 			turnLimitTerminated = true;
 			stopReason = "max_turns";
@@ -162,6 +242,11 @@ export async function runChildAgent(
 			terminateProcessTree(proc);
 		});
 		addLog({ at: Date.now(), type: "process_start", message: formatChildInvocationForLog(call.command, call.args) });
+		proc.stdin?.on("error", (error) => {
+			if (!isClosedPermissionPipeError(error)) addLog({ at: Date.now(), type: "stdin_error", message: error.message });
+		});
+		proc.stdin?.end(launch.stdin);
+
 		const permissionOutput = proc.stdio[3];
 		const permissionInput = proc.stdio[4];
 		if (permissionOutput && permissionInput) {
@@ -191,33 +276,35 @@ export async function runChildAgent(
 			});
 		}
 
-		const processLine = (line: string) => {
+		const toolCallIndexes = new Map<string, number>();
+		const processWorkerEvent = (line: string) => {
 			if (!line.trim()) return;
 			let event: any;
-			try { event = JSON.parse(line); } catch { addLog({ at: Date.now(), type: "unparsed_output", message: line.slice(0, 8_192) }); return; }
+			try { event = JSON.parse(line); } catch { addLog({ at: Date.now(), type: "unparsed_worker_event", message: line.slice(0, 8_192) }); return; }
 			agent.observedEvents = (agent.observedEvents ?? 0) + 1;
 			if (event.type === "agent_settled") {
 				settled = true;
-				setTimeout(() => { if (agent.process === proc) terminateProcessTree(proc); }, 100).unref();
 			}
-			if (event.type === "tool_execution_start" || event.type === "tool_call_start") {
-				if (agent.toolCalls.length < MAX_TOOL_CALLS) agent.toolCalls.push({ name: event.toolName ?? "tool", args: compactToolArgs(event.args) });
-				else agent.droppedToolCalls = (agent.droppedToolCalls ?? 0) + 1;
+			if (event.type === "tool_execution_start") {
+				if (agent.toolCalls.length < MAX_TOOL_CALLS) {
+					const index = agent.toolCalls.push({ name: event.toolName ?? "tool", args: compactToolArgs(event.args) }) - 1;
+					if (typeof event.toolCallId === "string") toolCallIndexes.set(event.toolCallId, index);
+				} else {
+					agent.droppedToolCalls = (agent.droppedToolCalls ?? 0) + 1;
+				}
 				onUpdate();
 			}
-			if (event.type === "tool_execution_end" && event.isError && agent.toolCalls.length) {
-				agent.toolCalls[agent.toolCalls.length - 1].error = true;
+			if (event.type === "tool_execution_end" && event.isError) {
+				const index = typeof event.toolCallId === "string" ? toolCallIndexes.get(event.toolCallId) : undefined;
+				if (index !== undefined && agent.toolCalls[index]) agent.toolCalls[index].error = true;
 				onUpdate();
 			}
-			if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
-				const message = event.message as Message;
+			if (event.type === "message_end") {
 				agent.observedMessages = (agent.observedMessages ?? 0) + 1;
-				if (message.role === "assistant") {
-					const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
-					if (text) finalAssistantOutput = text;
+				if (event.role === "assistant") {
 					usage.turns++;
 					agent.usage.turns++;
-					const current = message.usage;
+					const current = event.usage;
 					if (current) {
 						const input = current.input || 0;
 						const output = current.output || 0;
@@ -230,53 +317,72 @@ export async function runChildAgent(
 						usage.cacheWrite += cacheWrite; agent.usage.cacheWrite += cacheWrite;
 						usage.cost += cost; agent.usage.cost += cost;
 					}
-					selectedModel ||= message.model;
+					selectedModel ||= event.model;
 					if (!turnLimitTerminated) {
-						stopReason = message.stopReason;
-						errorMessage = message.errorMessage;
+						stopReason = event.stopReason;
+						errorMessage = event.errorMessage;
 					}
-					turnLimitGuard(message, usage.turns);
+					const guardMessage = {
+						role: "assistant",
+						content: event.hasToolCall ? [{ type: "toolCall" }] : [],
+						stopReason: event.stopReason,
+					} as Message;
+					turnLimitGuard(guardMessage, usage.turns);
 				}
 				onUpdate();
 			}
 		};
 
+		const workerEvents = proc.stdio[5];
+		if (workerEvents) {
+			const events = readline.createInterface({ input: workerEvents });
+			events.on("line", (line) => {
+				if (outputLimitExceeded) return;
+				if (Buffer.byteLength(line, "utf8") > MAX_WORKER_EVENT_LINE_BYTES) {
+					outputLimitExceeded = true;
+					stderr += `Workflow worker emitted an oversized IPC event (>${MAX_WORKER_EVENT_LINE_BYTES} bytes)`;
+					terminateProcessTree(proc);
+					return;
+				}
+				processWorkerEvent(line);
+			});
+			workerEvents.on("error", (error) => {
+				if (!isClosedPermissionPipeError(error)) addLog({ at: Date.now(), type: "worker_ipc_error", message: error.message });
+			});
+		}
+
 		proc.stdout?.on("data", (chunk: Buffer) => {
-			if (streamLimitExceeded) return;
-			stdoutBytes += chunk.length;
-			if (stdoutBytes > MAX_STREAM_BYTES) {
-				streamLimitExceeded = true;
-				stderr += `Workflow worker output exceeded ${MAX_STREAM_BYTES} bytes`;
+			if (outputLimitExceeded) return;
+			finalOutputBytes += chunk.length;
+			if (finalOutputBytes > MAX_FINAL_OUTPUT_BYTES) {
+				outputLimitExceeded = true;
+				stderr += `Workflow worker final response exceeded ${MAX_FINAL_OUTPUT_BYTES} bytes`;
 				terminateProcessTree(proc);
 				return;
 			}
-			buffer += stdoutDecoder.write(chunk);
-			const lines = buffer.split("\n");
-			buffer = lines.pop() ?? "";
-			if (Buffer.byteLength(buffer) > MAX_NDJSON_LINE_BYTES) {
-				streamLimitExceeded = true;
-				stderr += `Workflow worker emitted an oversized NDJSON line (>${MAX_NDJSON_LINE_BYTES} bytes)`;
-				terminateProcessTree(proc);
-				return;
-			}
-			for (const line of lines) processLine(line);
+			finalAssistantOutput += stdoutDecoder.write(chunk);
 		});
 		proc.stderr?.on("data", (chunk: Buffer) => {
 			stderrBytes += chunk.length;
 			if (stderrBytes <= MAX_STDERR_BYTES) stderr += stderrDecoder.write(chunk);
 		});
-		proc.on("error", (error) => { stderr += error.message; resolve(1); });
+		proc.on("error", (error) => {
+			agent.process = undefined;
+			launch.cleanup();
+			stderr += error.message;
+			resolveOnce(1);
+		});
 		proc.on("close", (code) => {
 			agent.process = undefined;
-			if (!streamLimitExceeded) {
-				buffer += stdoutDecoder.end();
-				if (buffer.trim()) processLine(buffer);
-			}
+			if (!outputLimitExceeded) finalAssistantOutput += stdoutDecoder.end();
+			else stdoutDecoder.end();
+			finalAssistantOutput = finalAssistantOutput.trim();
 			stderr += stderrDecoder.end();
 			if (stderrBytes > MAX_STDERR_BYTES) stderr += `\n[stderr truncated after ${MAX_STDERR_BYTES} bytes]`;
 			if (stderr.trim()) addLog({ at: Date.now(), type: "stderr", message: stderr.trim() });
 			addLog({ at: Date.now(), type: "process_exit", message: String(code ?? 1) });
-			resolve(streamLimitExceeded ? 1 : settled ? 0 : code ?? 1);
+			launch.cleanup();
+			resolveOnce(outputLimitExceeded ? 1 : settled ? 0 : code ?? 1);
 		});
 	});
 

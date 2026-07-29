@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Writable } from "node:stream";
 import test from "node:test";
 import {
 	buildChildAgentArgs,
+	buildChildSystemInstructions,
 	createPermissionResponseWriter,
 	formatChildInvocationForLog,
 	isClosedPermissionPipeError,
+	prepareChildAgentLaunch,
 } from "../extensions/workflows/child.ts";
 import { zeroUsage, type AgentState } from "../extensions/workflows/types.ts";
 
@@ -68,17 +73,48 @@ test("structured contracts and profile instructions stay out of the visible work
 		thinking: "max", effectiveThinking: "high", providerThinking: "high",
 		status: "queued", createdAt: 1, scanFindings: [], flags: [], usage: zeroUsage(), toolCalls: [], messages: [], events: [], logs: [], attempt: 0,
 	};
-	const args = buildChildAgentArgs(agent, { provider: "modelhub", id: "gpt-test" });
+	const systemPromptPath = "C:\\Temp\\piplusplus-worker\\system-prompt.md";
+	const args = buildChildAgentArgs(agent, { provider: "modelhub", id: "gpt-test" }, systemPromptPath);
 	const systemIndex = args.indexOf("--append-system-prompt");
+	const instructions = buildChildSystemInstructions(agent);
 
 	assert.ok(systemIndex >= 0);
-	assert.match(args[systemIndex + 1], /Workflow specialist profile: reviewer/);
-	assert.match(args[systemIndex + 1], /Workflow structured output contract/);
-	assert.match(args[systemIndex + 1], /"status"/);
-	assert.equal(args.at(-1), "Review the actual diff.");
+	assert.equal(args[systemIndex + 1], systemPromptPath);
+	assert.match(instructions ?? "", /Workflow specialist profile: reviewer/);
+	assert.match(instructions ?? "", /Workflow structured output contract/);
+	assert.match(instructions ?? "", /"status"/);
+	assert.ok(!args.includes("Review the actual diff."));
+	assert.deepEqual(args.slice(0, 4), ["--mode", "text", "-p", "--no-session"]);
 	assert.deepEqual(args.slice(args.indexOf("--thinking"), args.indexOf("--thinking") + 2), ["--thinking", "high"]);
 
 	const logged = formatChildInvocationForLog("pi", args);
-	assert.match(logged, /\[structured-output-contract\]/);
-	assert.doesNotMatch(logged, /"status"|Review the actual diff/);
+	assert.match(logged, /\[workflow-system-prompt-file\]/);
+	assert.doesNotMatch(logged, /system-prompt\.md|"status"|Review the actual diff/);
+});
+
+test("large worker prompts and schemas never enter Windows spawn arguments", () => {
+	const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "piplusplus-launch-test-"));
+	const prompt = `Inspect the repository.\n${"worker input ".repeat(100_000)}`;
+	const schemaDescription = "structured contract ".repeat(100_000);
+	const agent: AgentState = {
+		id: "large", label: "Large", phase: "Execution", prompt, kind: "general",
+		schema: { type: "object", description: schemaDescription, properties: { result: { type: "string" } } },
+		status: "queued", createdAt: 1, scanFindings: [], flags: [], usage: zeroUsage(), toolCalls: [], messages: [], events: [], logs: [], attempt: 0,
+	};
+	let launch: ReturnType<typeof prepareChildAgentLaunch> | undefined;
+	try {
+		launch = prepareChildAgentLaunch(agent, { provider: "modelhub", id: "gpt-test" }, tempRoot);
+		const argvBytes = launch.args.reduce((sum, value) => sum + Buffer.byteLength(value, "utf8") + 1, 0);
+
+		assert.equal(launch.stdin, prompt);
+		assert.ok(argvBytes < 4_096, `expected short argv, got ${argvBytes} bytes`);
+		assert.ok(!launch.args.some((value) => value.includes("worker input") || value.includes("structured contract")));
+		assert.ok(launch.systemPromptFile);
+		assert.match(fs.readFileSync(launch.systemPromptFile!, "utf8"), /structured contract/);
+		launch.cleanup();
+		assert.equal(fs.existsSync(launch.systemPromptFile!), false);
+	} finally {
+		launch?.cleanup();
+		fs.rmSync(tempRoot, { recursive: true, force: true });
+	}
 });
