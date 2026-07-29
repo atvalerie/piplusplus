@@ -163,7 +163,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		const choice = await ctx.ui.select(`Approve plan\n\n${formatPlanSteps(steps)}`, [
 			`Yes · ${compactLabel} · accept all edits`,
 			"Yes · execute and accept all edits",
-			"Yes · execute in conservative auto mode",
+			"Yes · execute in auto mode",
 			"Yes · execute with manual approvals",
 			"No · keep planning",
 			"Refine plan",
@@ -171,7 +171,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		]);
 		if (choice?.startsWith("Yes · Compact")) compactThenExecute(ctx, "accept-edits");
 		else if (choice === "Yes · execute and accept all edits") await executePlan(ctx, "accept-edits");
-		else if (choice === "Yes · execute in conservative auto mode") await executePlan(ctx, "auto");
+		else if (choice === "Yes · execute in auto mode") await executePlan(ctx, "auto");
 		else if (choice === "Yes · execute with manual approvals") await executePlan(ctx, "manual");
 		else if (choice === "Refine plan") {
 			const refinement = await ctx.ui.editor("Plan changes or missing constraints", "");

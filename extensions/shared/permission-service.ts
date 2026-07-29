@@ -9,6 +9,7 @@ export interface PermissionService {
 	registerMode?(mode: GlobalPermissionMode): () => void;
 	subscribe?(listener: () => void): () => void;
 	authorize(request: PermissionRequest, ctx?: ExtensionContext, options?: { forcePrompt?: boolean; reason?: string }): Promise<boolean>;
+	getDenialReason?(request: PermissionRequest): string | undefined;
 }
 
 const KEY = Symbol.for("piplusplus.permission-service");

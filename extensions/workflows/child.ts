@@ -32,7 +32,7 @@ export function isClosedPermissionPipeError(error: unknown): boolean {
 export function createPermissionResponseWriter(
 	stream: Writable,
 	onUnexpectedError: (error: Error) => void = () => {},
-): (response: { id: string; allow: boolean }) => boolean {
+): (response: { id: string; allow: boolean; reason?: string }) => boolean {
 	let closed = stream.destroyed || stream.writableEnded || !stream.writable;
 	const handleError = (error: Error) => {
 		closed = true;
@@ -174,8 +174,11 @@ export async function runChildAgent(
 					let request: { id: string; toolName: string; input: Record<string, unknown> };
 					try { request = JSON.parse(line); } catch { return; }
 					let allow = false;
+					let reason: string | undefined;
 					try {
-						allow = await onPermission({ agentId: agent.id, agentLabel: agent.label, toolName: request.toolName, input: request.input });
+						const permissionRequest: PermissionRequest = { agentId: agent.id, agentLabel: agent.label, toolName: request.toolName, input: request.input };
+						allow = await onPermission(permissionRequest);
+						reason = permissionRequest.denialReason;
 					} catch (error) {
 						addLog({
 							at: Date.now(),
@@ -183,7 +186,7 @@ export async function runChildAgent(
 							message: error instanceof Error ? error.message : String(error),
 						});
 					}
-					writePermissionResponse({ id: request.id, allow });
+					writePermissionResponse({ id: request.id, allow, reason });
 				})();
 			});
 		}

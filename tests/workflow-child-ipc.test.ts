@@ -43,6 +43,24 @@ test("permission response IPC reports unexpected stream failures without throwin
 	assert.equal((unexpected[0] as NodeJS.ErrnoException).code, "EACCES");
 });
 
+test("permission response IPC returns the auto-classifier denial reason to the worker", async () => {
+	let output = "";
+	const pipe = new Writable({
+		write(chunk, _encoding, callback) {
+			output += chunk.toString();
+			callback();
+		},
+	});
+	const write = createPermissionResponseWriter(pipe);
+	assert.equal(write({ id: "permission_7", allow: false, reason: "User explicitly said not to push." }), true);
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(JSON.parse(output), {
+		id: "permission_7",
+		allow: false,
+		reason: "User explicitly said not to push.",
+	});
+});
+
 test("structured contracts and profile instructions stay out of the visible worker prompt", () => {
 	const agent: AgentState = {
 		id: "review", label: "Review", phase: "Verification", prompt: "Review the actual diff.", kind: "review",

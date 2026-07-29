@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { PermissionMode, PermissionRequest } from "./types.ts";
 
@@ -67,6 +68,24 @@ export function isSafeInspectionCommand(command: string): boolean {
 	});
 }
 
+/** Claude Code keeps a final prompt circuit-breaker for deleting filesystem roots or the user's home directory. */
+export function isCriticalFilesystemRemoval(request: PermissionRequest, cwd = process.cwd()): boolean {
+	if (request.toolName !== "bash") return false;
+	const command = String(request.input.command ?? "");
+	if (!/\b(?:rm|rmdir|del|erase|remove-item)\b/i.test(command)) return false;
+	const root = path.parse(path.resolve(cwd)).root;
+	const home = path.resolve(os.homedir());
+	const tokens = command.match(/"[^"]*"|'[^']*'|[^\s;&|]+/g) ?? [];
+	return tokens.some((raw) => {
+		const token = raw.replace(/^(['"])(.*)\1$/, "$2").replace(/[),]+$/, "");
+		if (["/", "~", "~/*", "$HOME", "$HOME/*", "${HOME}", "${HOME}/*"].includes(token)) return true;
+		if (!path.isAbsolute(token)) return false;
+		const withoutTrailingGlob = token.replace(/[\\/]\*$/, "");
+		const resolved = path.resolve(withoutTrailingGlob);
+		return resolved === root || resolved === home;
+	});
+}
+
 export function scopedToolRequiresExplicitApproval(request: PermissionRequest, writePaths: string[] | undefined): boolean {
 	if (!writePaths) return false;
 	if (request.toolName === "bash") return !isSafeInspectionCommand(String(request.input.command ?? ""));
@@ -103,19 +122,39 @@ function relativeSegments(root: string, target: string): string[] {
 	return path.relative(root, target).split(/[\\/]+/).filter(Boolean).map((segment) => segment.toLowerCase());
 }
 
-function protectedAccess(segments: string[]): { access: PathAccess; explanation: string } | undefined {
-	if (segments.some((segment) => segment === ".ssh" || /^\.env(?:\.|$)/i.test(segment) || segment === ".npmrc" || segment === ".yarnrc.yml")) {
-		return { access: "deny", explanation: "The path is a credential or environment-secret location." };
+const PROTECTED_DIRECTORIES = new Set([".git", ".pi", ".vscode", ".idea", ".husky"]);
+const PROTECTED_FILES = new Set([
+	".gitconfig",
+	".gitmodules",
+	".bashrc",
+	".bash_profile",
+	".zshrc",
+	".zprofile",
+	".profile",
+	".ripgreprc",
+	".mcp.json",
+	".claude.json",
+]);
+const CLAUDE_WRITABLE_DIRECTORIES = new Set(["commands", "agents", "skills", "worktrees"]);
+
+/**
+ * Match Claude Code's protected-write boundary. Sensitive reads are controlled
+ * by explicit permission rules in Claude Code rather than an implicit .env/.ssh
+ * deny, so this baseline intentionally protects writes only.
+ */
+function protectedWriteAccess(segments: string[]): { access: PathAccess; explanation: string } | undefined {
+	if (segments.some((segment) => PROTECTED_DIRECTORIES.has(segment))) {
+		return { access: "ask", explanation: "The path is repository metadata, Pi configuration, IDE configuration, or a hook location." };
 	}
-	if (segments.some((segment) => [".git", ".pi", ".claude", ".vscode", ".idea", ".husky"].includes(segment))) {
-		return { access: "ask", explanation: "The path is repository metadata, agent configuration, IDE configuration, or a hook location." };
+	const claudeIndex = segments.indexOf(".claude");
+	if (claudeIndex >= 0) {
+		const child = segments[claudeIndex + 1];
+		if (!child || !CLAUDE_WRITABLE_DIRECTORIES.has(child)) {
+			return { access: "ask", explanation: "The path is protected Claude configuration." };
+		}
 	}
-	if (segments.length >= 2 && segments[0] === ".github" && segments[1] === "workflows") {
-		return { access: "ask", explanation: "CI workflow files can execute privileged repository automation." };
-	}
-	const basename = segments.at(-1) ?? "";
-	if (["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml", "bun.lock", "bun.lockb"].includes(basename)) {
-		return { access: "ask", explanation: "Package-manager control files can change installed or executed code." };
+	if (PROTECTED_FILES.has(segments.at(-1) ?? "")) {
+		return { access: "ask", explanation: "The file is protected shell, repository, MCP, or Claude configuration." };
 	}
 	return undefined;
 }
@@ -147,23 +186,29 @@ export function classifyPathAccess(
 	}
 	if (!inside(pair.cwdRequested, pair.requested)) {
 		return {
-			access: operation === "edit" ? "deny" : "ask",
+			access: operation === "edit" ? "ask" : "allow",
 			requestedPath: pair.requested,
 			resolvedPath: pair.resolved,
-			explanation: `The requested path is outside the workflow directory.`,
+			explanation: operation === "edit"
+				? "The requested write path is outside the working directory."
+				: "Read-only access outside the working directory.",
 		};
 	}
 	if (!inside(pair.cwdResolved, pair.resolved)) {
 		return {
-			access: operation === "edit" ? "deny" : "ask",
+			access: operation === "edit" ? "ask" : "allow",
 			requestedPath: pair.requested,
 			resolvedPath: pair.resolved,
-			explanation: "The path resolves through a symlink or junction outside the workflow directory.",
+			explanation: operation === "edit"
+				? "The write path resolves through a symlink or junction outside the working directory."
+				: "Read-only access through a symlink or junction outside the working directory.",
 		};
 	}
-	const protectedPath = protectedAccess(relativeSegments(pair.cwdRequested, pair.requested))
-		?? protectedAccess(relativeSegments(pair.cwdResolved, pair.resolved));
-	if (protectedPath) return { ...protectedPath, requestedPath: pair.requested, resolvedPath: pair.resolved };
+	if (operation === "edit") {
+		const protectedPath = protectedWriteAccess(relativeSegments(pair.cwdRequested, pair.requested))
+			?? protectedWriteAccess(relativeSegments(pair.cwdResolved, pair.resolved));
+		if (protectedPath) return { ...protectedPath, requestedPath: pair.requested, resolvedPath: pair.resolved };
+	}
 	return { access: "allow", requestedPath: pair.requested, resolvedPath: pair.resolved, explanation: `The path is inside the workflow directory.` };
 }
 

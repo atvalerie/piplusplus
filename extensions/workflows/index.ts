@@ -254,12 +254,20 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		const policyMode = mode === "plan" || mode === "accept-edits" ? "auto" : mode === "dangerous" ? "manual" : mode;
 		const decision = explainPermission(request, run.cwd, policyMode, { artifactRoots: [artifactDir] });
 		const agent = run.agents.find((candidate) => candidate.id === request.agentId);
+		if (agent) {
+			request.context = {
+				delegatedTask: agent.prompt,
+				priorToolCalls: agent.toolCalls.slice(-100),
+			};
+		}
 		if (decision.hardDeny) {
+			request.denialReason = decision.explanation;
 			agent?.logs.push({ at: Date.now(), type: "permission_denied", tool: request.toolName, message: decision.explanation });
 			return false;
 		}
 		if (agent?.writePaths && (request.toolName === "write" || request.toolName === "edit") && !isPathWithinWriteScope(run.cwd, request.input.path, agent.writePaths)) {
-			agent.logs.push({ at: Date.now(), type: "permission_denied", tool: request.toolName, message: `Target is outside declared write scope: ${agent.writePaths.join(", ")}` });
+			request.denialReason = `Target is outside declared write scope: ${agent.writePaths.join(", ")}`;
+			agent.logs.push({ at: Date.now(), type: "permission_denied", tool: request.toolName, message: request.denialReason });
 			return false;
 		}
 		agent?.logs.push({ at: Date.now(), type: "permission_request", tool: request.toolName, message: `${mode}/${decision.risk}: ${decision.explanation}` });
@@ -275,7 +283,8 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 		const allow = service
 			? await service.authorize(request, ctxNow, reasons.length ? { forcePrompt: true, reason: reasons.join("\n") } : undefined)
 			: decision.allow;
-		agent?.logs.push({ at: Date.now(), type: allow ? "permission_allowed" : "permission_denied", tool: request.toolName, message: service ? `global ${mode} policy` : "global permission extension unavailable; read-only fallback" });
+		if (!allow) request.denialReason = service?.getDenialReason?.(request) ?? decision.explanation;
+		agent?.logs.push({ at: Date.now(), type: allow ? "permission_allowed" : "permission_denied", tool: request.toolName, message: allow ? `global ${mode} policy` : request.denialReason ?? "global permission extension unavailable; read-only fallback" });
 		return allow;
 	}
 
@@ -487,7 +496,7 @@ export default function workflowsExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "workflow_run",
 		label: "Dynamic Workflow",
-		description: "Compile and run a deterministic JavaScript orchestration script in the background. The script can create up to 1000 isolated subagents with manual, conservative auto, or read-only tool permissions, and manage up to 16 concurrently. Intermediate results stay in script variables; only the returned value is delivered to the main conversation.",
+		description: "Compile and run a deterministic JavaScript orchestration script in the background. The script can create up to 1000 isolated subagents with manual, Claude-compatible auto, or read-only tool permissions, and manage up to 16 concurrently. Intermediate results stay in script variables; only the returned value is delivered to the main conversation.",
 		promptSnippet: "Run JavaScript-orchestrated background workflows with many independently prompted and model-routed subagents",
 		promptGuidelines: [
 			"Recipes (diagnose, design, review, implement) are optional conveniences, not mandatory templates. Freely write a custom JavaScript workflow whenever it better matches the task, routing, or model strategy.",

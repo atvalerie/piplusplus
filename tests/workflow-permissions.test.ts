@@ -4,13 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { getPermissionService, installPermissionService, removePermissionService, type PermissionService } from "../extensions/shared/permission-service.ts";
-import { acceptEditsAutoApproves, classifyPathAccess, explainPermission, isPathWithinWriteScope, mutationOverlapsWriteScopes, scopedToolRequiresExplicitApproval } from "../extensions/workflows/permissions.ts";
+import { acceptEditsAutoApproves, classifyPathAccess, explainPermission, isCriticalFilesystemRemoval, isPathWithinWriteScope, mutationOverlapsWriteScopes, scopedToolRequiresExplicitApproval } from "../extensions/workflows/permissions.ts";
 
 const request = (toolName: string, input: Record<string, unknown>) => ({ agentId: "a", agentLabel: "Agent", toolName, input });
 
 test("auto mode only approves deterministic low-risk operations", () => {
 	assert.equal(explainPermission(request("read", { path: "README.md" }), "/repo", "auto").allow, true);
-	assert.equal(explainPermission(request("read", { path: "../outside.txt" }), "/repo", "read-only").allow, false);
+	assert.equal(explainPermission(request("read", { path: "../outside.txt" }), "/repo", "read-only").allow, true);
 	assert.equal(explainPermission(request("read", { path: "/agent/workflows/artifacts/wf.json" }), "/repo", "read-only", { artifactRoots: ["/agent/workflows/artifacts"] }).allow, true);
 	assert.equal(explainPermission(request("bash", { command: "git status" }), "/repo", "auto").allow, true);
 	assert.equal(explainPermission(request("bash", { command: "dir" }), "/repo", "auto").allow, true);
@@ -34,10 +34,11 @@ test("auto mode only approves deterministic low-risk operations", () => {
 	]) assert.equal(explainPermission(request("bash", { command }), "/repo", "auto").allow, false, command);
 	assert.equal(explainPermission(request("write", { path: "src/new.ts" }), "/repo", "auto").allow, true);
 	assert.equal(explainPermission(request("write", { path: "../outside" }), "/repo", "auto").allow, false);
-	assert.equal(explainPermission(request("write", { path: ".env" }), "/repo", "auto").allow, false);
-	assert.equal(explainPermission(request("write", { path: "src\\.env\\secret" }), "/repo", "auto").allow, false);
-	assert.equal(explainPermission(request("write", { path: "package.json" }), "/repo", "auto").automatic, false);
-	assert.equal(explainPermission(request("read", { path: ".git/config" }), "/repo", "auto").automatic, false);
+	assert.equal(explainPermission(request("write", { path: ".env" }), "/repo", "auto").allow, true);
+	assert.equal(explainPermission(request("write", { path: "src\\.env\\secret" }), "/repo", "auto").allow, true);
+	assert.equal(explainPermission(request("write", { path: "package.json" }), "/repo", "auto").automatic, true);
+	assert.equal(explainPermission(request("read", { path: ".git/config" }), "/repo", "auto").automatic, true);
+	assert.equal(explainPermission(request("write", { path: ".git/config" }), "/repo", "auto").automatic, false);
 });
 
 test("manual and read-only modes fail closed for mutations", () => {
@@ -46,13 +47,20 @@ test("manual and read-only modes fail closed for mutations", () => {
 	assert.equal(explainPermission(request("edit", { path: "src/a.ts" }), "/repo", "read-only").allow, false);
 });
 
-test("accept-edits auto-approval stays inside the workflow directory and avoids sensitive paths", () => {
+test("filesystem root and home removals retain the final explicit-approval circuit breaker", () => {
+	assert.equal(isCriticalFilesystemRemoval(request("bash", { command: "rm -rf /" }), "/repo"), true);
+	assert.equal(isCriticalFilesystemRemoval(request("bash", { command: "Remove-Item -Recurse $HOME" }), "/repo"), true);
+	assert.equal(isCriticalFilesystemRemoval(request("bash", { command: "rm -rf ./build" }), "/repo"), false);
+	assert.equal(isCriticalFilesystemRemoval(request("write", { path: "/" }), "/repo"), false);
+});
+
+test("accept-edits auto-approval stays inside the workflow directory and prompts for protected writes", () => {
 	const inside = request("edit", { path: "src/a.ts" });
 	const outside = request("edit", { path: "../outside.ts" });
-	const sensitive = request("write", { path: ".env" });
+	const protectedPath = request("write", { path: ".git/config" });
 	assert.equal(acceptEditsAutoApproves(inside, explainPermission(inside, "/repo", "auto")), true);
 	assert.equal(acceptEditsAutoApproves(outside, explainPermission(outside, "/repo", "auto")), false);
-	assert.equal(acceptEditsAutoApproves(sensitive, explainPermission(sensitive, "/repo", "auto")), false);
+	assert.equal(acceptEditsAutoApproves(protectedPath, explainPermission(protectedPath, "/repo", "auto")), false);
 });
 
 test("path policy resolves traversal, protected paths, artifact exceptions, and non-existent targets", () => {
@@ -61,15 +69,16 @@ test("path policy resolves traversal, protected paths, artifact exceptions, and 
 	try {
 		fs.mkdirSync(path.join(repo, "src"));
 		assert.equal(classifyPathAccess(repo, "src/new/deep.ts", "edit").access, "allow");
-		assert.equal(classifyPathAccess(repo, "../escape.ts", "edit").access, "deny");
-		assert.equal(classifyPathAccess(repo, "../outside.txt", "read").access, "ask");
-		assert.equal(classifyPathAccess(repo, ".env.local", "read").access, "deny");
-		assert.equal(classifyPathAccess(repo, ".ssh/config", "edit").access, "deny");
+		assert.equal(classifyPathAccess(repo, "../escape.ts", "edit").access, "ask");
+		assert.equal(classifyPathAccess(repo, "../outside.txt", "read").access, "allow");
+		assert.equal(classifyPathAccess(repo, ".env.local", "read").access, "allow");
+		assert.equal(classifyPathAccess(repo, ".ssh/config", "edit").access, "allow");
 		assert.equal(classifyPathAccess(repo, ".pi/settings.json", "edit").access, "ask");
 		assert.equal(classifyPathAccess(repo, ".claude/hooks/pre-tool.js", "edit").access, "ask");
+		assert.equal(classifyPathAccess(repo, ".claude/skills/example/SKILL.md", "edit").access, "allow");
 		assert.equal(classifyPathAccess(repo, ".vscode/settings.json", "edit").access, "ask");
-		assert.equal(classifyPathAccess(repo, ".github/workflows/ci.yml", "edit").access, "ask");
-		assert.equal(classifyPathAccess(repo, "package-lock.json", "edit").access, "ask");
+		assert.equal(classifyPathAccess(repo, ".github/workflows/ci.yml", "edit").access, "allow");
+		assert.equal(classifyPathAccess(repo, "package-lock.json", "edit").access, "allow");
 		const artifact = path.join(artifacts, "wf.json");
 		const other = path.join(artifacts, "notes.txt");
 		const payloadDirectory = path.join(artifacts, "wf.data");
@@ -78,8 +87,8 @@ test("path policy resolves traversal, protected paths, artifact exceptions, and 
 		const nestedJson = path.join(payloadDirectory, "unrelated.json");
 		assert.equal(classifyPathAccess(repo, artifact, "read", { artifactRoots: [artifacts] }).access, "allow");
 		assert.equal(classifyPathAccess(repo, payload, "read", { artifactRoots: [artifacts] }).access, "allow");
-		assert.equal(classifyPathAccess(repo, nestedJson, "read", { artifactRoots: [artifacts] }).access, "ask");
-		assert.equal(classifyPathAccess(repo, other, "read", { artifactRoots: [artifacts] }).access, "ask");
+		assert.equal(classifyPathAccess(repo, nestedJson, "read", { artifactRoots: [artifacts] }).access, "allow");
+		assert.equal(classifyPathAccess(repo, other, "read", { artifactRoots: [artifacts] }).access, "allow");
 	} finally {
 		fs.rmSync(repo, { recursive: true, force: true });
 		fs.rmSync(artifacts, { recursive: true, force: true });
@@ -93,8 +102,8 @@ test("real-path checks block symlink and junction escapes from write scopes", (t
 		const link = path.join(repo, "linked");
 		try { fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir"); }
 		catch (error) { t.skip(`symlink creation unavailable: ${error instanceof Error ? error.message : String(error)}`); return; }
-		assert.equal(classifyPathAccess(repo, path.join("linked", "new.ts"), "edit").access, "deny");
-		assert.equal(classifyPathAccess(repo, path.join("linked", "readme.txt"), "read").access, "ask");
+		assert.equal(classifyPathAccess(repo, path.join("linked", "new.ts"), "edit").access, "ask");
+		assert.equal(classifyPathAccess(repo, path.join("linked", "readme.txt"), "read").access, "allow");
 		assert.equal(isPathWithinWriteScope(repo, path.join("linked", "new.ts"), ["linked"]), false);
 	} finally {
 		fs.rmSync(repo, { recursive: true, force: true });

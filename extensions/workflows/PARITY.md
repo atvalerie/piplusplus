@@ -28,8 +28,8 @@ Public references used for this audit:
 | Provider/vendor constraints | Claude Code is Anthropic-model based. | `allowedProviders`, `allowedFamilies`, and `allowedModels` intersect to hard-limit OpenCode Go, direct Anthropic, OpenAI API-key or ChatGPT/Codex OAuth, and ModelHub routing. | Pi++ extension |
 | Exact identity | Public behavior exposes selected model configuration. | Runtime also rejects output when the child reports a different exact model. | Pi++ hardening |
 | Tool restriction | Subagents can inherit or restrict tools. | Each worker can inherit all tools or receive an allowlist/read-only alias. | Match for allowlists |
-| Permission inheritance | Subagents inherit parent permission context; background work auto-denies prompts that cannot be shown. | Workers use the global Pi++ mode. Confirmation remains possible with UI; without UI it fails closed. | Intentional divergence |
-| Direct path security | Claude permission rules and protected paths gate tools. | Requested/real paths, closest existing parents, sensitive paths, symlink/junction escapes, and artifact exceptions are centralized. | Compatible goal, Pi++ policy differs |
+| Permission inheritance | Subagents inherit parent permission context; auto mode classifies their task and actions. | Workers use the global Pi++ mode; auto classification receives the delegated task and bounded prior tool calls, returns denial reasons to the child, and never receives tool results. | Public auto-mode behavior matched; launch/return checks remain host-limited |
+| Direct path security | Claude permission rules and protected paths gate tools. | Requested/real paths, closest existing parents, symlink/junction escapes, artifact exceptions, and Claude's protected-write set are centralized. | Protected-write baseline matched; declarative rule engine differs |
 | Shell isolation | Claude supports sandboxing and `isolation: worktree`. | Pi 0.82.1 has no worker write-root hook. Scoped shell/custom mutations require explicit acknowledgement but are not OS-confined. | Known gap |
 | Parallel workers | Claude supports foreground/background subagents and parallel research. | `parallel()` and concurrent independent workers are first-class; maximum concurrency is 16. | Match in outcome |
 | Nested delegation | Claude subagents cannot spawn subagents; the parent chains them. | Workflow child processes do not load the workflow extension; QuickJS parent orchestration chains workers. | Match |
@@ -61,7 +61,7 @@ Public references used for this audit:
 - No OS/process sandbox or temporary git worktree per mutating worker.
 - No full worker transcript continuation across a restarted Pi process.
 - Saved workflow JavaScript is Pi++-specific and does not load Claude `.claude/agents/*.md` definitions.
-- Pi's global permission modes do not reproduce every Claude precedence rule (`dontAsk`, managed policy, background auto-denial, and `bypassPermissions`) one-for-one.
+- Pi's global permission modes do not reproduce every Claude precedence rule (`dontAsk`, managed settings/rules, and startup gating for `bypassPermissions`) one-for-one. Auto mode does reproduce the public no-prompt classifier flow, stripped tool results, denial reasons/retry list, and 3-consecutive/20-total fallback counters.
 - The manager is a Pi extension UI, not Claude Code's native agent view.
 
 ## Acceptance audit

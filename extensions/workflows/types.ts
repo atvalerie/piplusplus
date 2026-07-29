@@ -159,6 +159,13 @@ export interface PermissionRequest {
 	agentLabel: string;
 	toolName: string;
 	input: Record<string, unknown>;
+	/** Optional worker context supplied to the auto-mode classifier without tool results. */
+	context?: {
+		delegatedTask?: string;
+		priorToolCalls?: Array<{ name: string; args?: unknown; error?: boolean }>;
+	};
+	/** Runtime-only denial detail returned to an isolated workflow child. */
+	denialReason?: string;
 }
 
 export interface WorkflowBudgets {
